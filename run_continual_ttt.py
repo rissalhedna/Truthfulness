@@ -71,12 +71,11 @@ parser.add_argument('--ema_alpha', type=float, default=0.05, help='EMA smoothing
 parser.add_argument('--ttt_burst', type=int, default=20, help='Number of TTT rounds per trigger')
 parser.add_argument('--ttt_warmup', type=int, default=50, help='Force TTT for first N questions (warmup)')
 args = parser.parse_args()
-
 # Handle accumulation flags
 if args.no_accumulation:
     args.accumulation = False
 elif not args.accumulation and not args.no_accumulation:
-    args.accumulation = True  # Default to accumulation
+    args.accumulation = True
 
 # SET GPU BEFORE ANY IMPORTS
 os.environ['CUDA_VISIBLE_DEVICES'] = str(args.gpu)
