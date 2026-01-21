@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# If shit hits the fan run this: mkdir -p /tmp/cursor-server-3hedna && ln -s /tmp/cursor-server-3hedna ~/.cursor-server
 """
 Continual Test-Time Training with Discriminative Calibration
 =============================================================
