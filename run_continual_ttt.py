@@ -35,6 +35,7 @@ parser.add_argument('--k_distractors', type=int, default=4, help='Number of dist
 parser.add_argument('--use_raw_ptrue', action='store_true', help='Use raw P(True) without normalization for target bin')
 parser.add_argument('--lr', type=float, default=5e-5, help='Learning rate')
 parser.add_argument('--lora_r', type=int, default=8, help='LoRA rank')
+parser.add_argument('--lora_alpha', type=int, default=16, help='LoRA alpha (scaling factor)')
 parser.add_argument('--model_name', type=str, default='meta-llama/Llama-3.2-3B-Instruct', help='Main model')
 parser.add_argument('--neighbor_model', type=str, default='meta-llama/Llama-3.2-3B-Instruct', help='Neighbor generator model')
 parser.add_argument('--no_wandb', action='store_true', help='Disable W&B logging')
@@ -64,6 +65,8 @@ parser.add_argument('--seed', type=int, default=42, help='Random seed')
 parser.add_argument('--num_bins', type=int, default=10, help='Number of confidence bins (rolling quantile edges)')
 parser.add_argument('--bin_window', type=int, default=500, help='Rolling window size for bin quantiles')
 parser.add_argument('--bin_min_count', type=int, default=100, help='Minimum samples before using quantile edges')
+parser.add_argument('--fixed_bins', action='store_true', help='Use fixed uniform bin edges instead of adaptive quantile edges')
+parser.add_argument('--neighbors_only', action='store_true', help='Train on generated neighbors only, exclude the input question from training')
 # PH-gated TTT arguments
 parser.add_argument('--use_ph_gate', action='store_true', help='Enable PH-gated TTT (only train on detected drift)')
 parser.add_argument('--ph_delta', type=float, default=0.05, help='PH tolerance parameter')
@@ -71,6 +74,9 @@ parser.add_argument('--ph_threshold', type=float, default=4.0, help='PH trigger 
 parser.add_argument('--ema_alpha', type=float, default=0.05, help='EMA smoothing factor (lower=smoother)')
 parser.add_argument('--ttt_burst', type=int, default=20, help='Number of TTT rounds per trigger')
 parser.add_argument('--ttt_warmup', type=int, default=50, help='Force TTT for first N questions (warmup)')
+# Layer targeting arguments
+parser.add_argument('--layer_start', type=int, default=24, help='First layer to apply LoRA (default: 24 for late layers)')
+parser.add_argument('--layer_end', type=int, default=32, help='Last layer (exclusive) to apply LoRA (default: 32)')
 args = parser.parse_args()
 # Handle accumulation flags
 if args.no_accumulation:
@@ -148,8 +154,9 @@ BENCHMARK_MODES = {
     'arc_first': ['arc', 'truthfulqa', 'gsm8k', 'mmlu'],
 }
 
-LATE_LAYER_START = 24  # Tune layers 24-31
-NUM_LAYERS = 32
+# Layer targeting: now configurable via --layer_start and --layer_end
+LAYER_START = args.layer_start
+LAYER_END = args.layer_end
 
 NUM_BINS = args.num_bins
 CONF_TO_PROB = {i: (i + 0.5) / NUM_BINS for i in range(NUM_BINS)}
@@ -158,7 +165,7 @@ create_qa_prompt = partial(_create_qa_prompt, num_bins=NUM_BINS)
 extract_confidence = partial(_extract_confidence, num_bins=NUM_BINS)
 
 print("=" * 70)
-print("CONTINUAL TTT WITH DISCRIMINATIVE CALIBRATION - LATE LAYERS (24-31)")
+print(f"CONTINUAL TTT WITH DISCRIMINATIVE CALIBRATION - LAYERS {LAYER_START}-{LAYER_END-1}")
 print("=" * 70)
 print(f"PyTorch: {torch.__version__}")
 print(f"CUDA available: {torch.cuda.is_available()}")
@@ -183,7 +190,7 @@ base_model = AutoModelForCausalLM.from_pretrained(
 ).to(DEVICE)
 base_model.eval()
 print(f"Base model loaded to: {next(base_model.parameters()).device}")
-print(f"Model has {NUM_LAYERS} layers, will target late layers: {LATE_LAYER_START}-{NUM_LAYERS-1}")
+print(f"Model layers targeted: {LAYER_START}-{LAYER_END-1}")
 
 if NEIGHBOR_MODEL_NAME == MODEL_NAME:
     # Important VRAM optimization: don't load the same model twice.
@@ -222,15 +229,17 @@ def get_late_layers_target_modules(start_layer, end_layer):
 class RollingBinMapper:
     """Maintain rolling quantile bin edges for dynamic binning."""
 
-    def __init__(self, num_bins: int, window_size: int = 500, min_count: int = 100):
+    def __init__(self, num_bins: int, window_size: int = 500, min_count: int = 100, fixed: bool = False):
         self.num_bins = num_bins
         self.window = deque(maxlen=window_size)
         self.min_count = min_count
+        self.fixed = fixed  # If True, never update edges (use uniform)
         self.edges = np.linspace(0.0, 1.0, num_bins + 1)
 
     def add(self, value: float):
         self.window.append(float(value))
-        if len(self.window) >= self.min_count:
+        # Only update edges if not in fixed mode
+        if not self.fixed and len(self.window) >= self.min_count:
             qs = np.linspace(0.0, 1.0, self.num_bins + 1)
             edges = np.quantile(np.clip(self.window, 0.0, 1.0), qs)
             edges[0] = 0.0
@@ -245,9 +254,12 @@ class RollingBinMapper:
 
     def get_edges(self):
         return self.edges
+    
+    def is_fixed(self):
+        return self.fixed
 
 
-bin_mapper = RollingBinMapper(NUM_BINS, args.bin_window, args.bin_min_count)
+bin_mapper = RollingBinMapper(NUM_BINS, args.bin_window, args.bin_min_count, fixed=args.fixed_bins)
 
 
 class PHGate:
@@ -772,21 +784,42 @@ def best_option_first(answer_text, options):
     return [options[best_idx]] + [opt for i, opt in enumerate(options) if i != best_idx]
 
 
-def train_single_question_discriminative(question, train_model, optimizer, tokenizer, n_neighbors=5, n_epochs=3, dataset_type="auto"):
-    """Train on a single question using discriminative P(True) as pseudo-label."""
+def train_single_question_discriminative(question, train_model, optimizer, tokenizer, n_neighbors=5, n_epochs=3, dataset_type="auto", neighbors_only=False):
+    """Train on a single question using discriminative P(True) as pseudo-label.
+    
+    Training data includes:
+    - The input question itself (included unless neighbors_only=True)
+    - Plus n_neighbors generated similar questions (if n_neighbors > 0)
+    
+    So n_neighbors=0, neighbors_only=False → train on input only (1 sample)
+       n_neighbors=3, neighbors_only=False → train on input + 3 neighbors (4 samples)
+       n_neighbors=3, neighbors_only=True  → train on 3 neighbors only (no input)
+    """
     
     bin_digit_tokens = get_bin_digit_tokens(tokenizer)
     pknow_values = []
     
+    # Build list of questions to train on: input question + neighbors
+    questions_to_train = []
+    if not neighbors_only:
+        questions_to_train.append({'question': question, 'difficulty': 'input'})  # Include input
+    
     train_model.eval()
-    with torch.no_grad():
-        neighbors = generate_neighborhood_questions(question, neighbor_model, neighbor_tokenizer, n_neighbors)
+    if n_neighbors > 0:
+        # Use disable_adapter() to generate neighbors from the clean base model,
+        # preventing accumulated LoRA weights from affecting neighbor quality
+        with train_model.disable_adapter():
+            with torch.no_grad():
+                neighbors = generate_neighborhood_questions(question, neighbor_model, neighbor_tokenizer, n_neighbors)
+        questions_to_train.extend(neighbors)
     
-    if not neighbors:
-        neighbors = [{'question': question, 'difficulty': 'similar'}]
+    # Safety: if neighbors_only but n_neighbors=0, fall back to input question
+    if len(questions_to_train) == 0:
+        questions_to_train.append({'question': question, 'difficulty': 'input'})
     
+    # === Pass 1: Collect raw signals for all training questions ===
     neighbor_data = []
-    for n in neighbors:
+    for n in questions_to_train:
         q = n['question'] if isinstance(n, dict) else n
         difficulty = n.get('difficulty', 'similar') if isinstance(n, dict) else 'similar'
         
@@ -820,8 +853,8 @@ def train_single_question_discriminative(question, train_model, optimizer, token
         del outputs
         
         # Generate candidates and compute normalized P(True)
-        # If MCQ, use option text; else generated distractors
-        mc_opts = _extract_mc_options(question) if dataset_type in ['mmlu', 'arc', 'truthfulqa_mc'] else {}
+        # If MCQ, use option text; else generated distractors (BUG 4 fix: use q not question)
+        mc_opts = _extract_mc_options(q) if dataset_type in ['mmlu', 'arc', 'truthfulqa_mc'] else {}
         if mc_opts:
             # Ordered by letter
             ordered = [f"{ltr}. {mc_opts[ltr]}" for ltr in sorted(mc_opts.keys())]
@@ -859,19 +892,6 @@ def train_single_question_discriminative(question, train_model, optimizer, token
         else:
             p_true_norm = normalize_p_true_sharpened(p_scores, temperature=args.norm_temperature)
         
-        p_know_mean = float(np.mean(pknow_values)) if pknow_values else 0.5
-        p_fused = p_true_norm * p_know_mean
-        
-        if args.use_raw_ptrue or no_distractors:
-            p_for_bin = p_true_raw  # raw P(True)
-        elif args.use_fused_confidence:
-            p_for_bin = p_fused     # fused P(True) * P(Know)
-        else:
-            p_for_bin = p_true_norm  # normalized P(True)
-
-        bin_mapper.add(p_for_bin)
-        target_bin = p_true_to_bin(p_for_bin)
-        
         neighbor_data.append({
             'question': q,
             'difficulty': difficulty,
@@ -880,10 +900,27 @@ def train_single_question_discriminative(question, train_model, optimizer, token
             'p_true_raw': p_true_raw,
             'p_true_norm': p_true_norm,
             'p_know': p_know,
-            'p_know_mean': p_know_mean,
-            'p_fused': p_fused,
-            'target_bin': target_bin
+            'no_distractors': no_distractors,
         })
+    
+    # === Pass 2: Compute derived values with global p_know_mean ===
+    p_know_mean = float(np.mean(pknow_values)) if pknow_values else 0.5
+    
+    for nd in neighbor_data:
+        nd['p_know_mean'] = p_know_mean
+        nd['p_fused'] = nd['p_true_norm'] * p_know_mean
+        
+        if args.use_raw_ptrue or nd['no_distractors']:
+            p_for_bin = nd['p_true_raw']   # raw P(True)
+        elif args.use_p_know:
+            p_for_bin = nd['p_know']       # P(Know) as training target
+        elif args.use_fused_confidence:
+            p_for_bin = nd['p_fused']      # fused P(True) * P(Know)
+        else:
+            p_for_bin = nd['p_true_norm']  # normalized P(True)
+
+        bin_mapper.add(p_for_bin)
+        nd['target_bin'] = p_true_to_bin(p_for_bin)
     
     train_model.train()
     training_losses = []
@@ -1036,9 +1073,10 @@ def run_continual_experiment():
     
     no_accumulation = not args.accumulation
     use_wandb = not args.no_wandb
+    os.makedirs("results", exist_ok=True)
     
     print(f"\n{'='*70}")
-    print("RUNNING CONTINUAL DISCRIMINATIVE TTT - LATE LAYERS (24-31)")
+    print(f"RUNNING CONTINUAL DISCRIMINATIVE TTT - LAYERS {LAYER_START}-{LAYER_END-1}")
     print(f"{'='*70}")
     print(f"Mode: {args.mode}")
     print(f"Domain order: {' → '.join(domain_order)}")
@@ -1048,6 +1086,10 @@ def run_continual_experiment():
     print(f"Learning rate: {args.lr}")
     print(f"Weight accumulation: {'OFF' if no_accumulation else 'ON'}")
     print(f"Baseline only: {args.baseline_only}")
+    bin_mode = "FIXED (uniform edges)" if args.fixed_bins else f"ADAPTIVE (window={args.bin_window}, min={args.bin_min_count})"
+    print(f"Bin edges: {bin_mode}")
+    if args.use_ph_gate:
+        print(f"PH Gate: ON (delta={args.ph_delta}, threshold={args.ph_threshold}, burst={args.ttt_burst})")
     print()
     
     # Load all datasets
@@ -1099,34 +1141,27 @@ def run_continual_experiment():
             baseline_str = "BASELINE_" if args.baseline_only else ""
             run_name = f"{baseline_str}CONT_{args.mode}_{accum_str}_nb{args.n_neighbors}_{timestamp}"
         
+        # Log all args so every ablation parameter is visible in W&B
+        wandb_config = vars(args).copy()
+        wandb_config["method"] = "continual_discriminative_late_layers"
+        wandb_config["domains"] = domain_order
+        wandb_config["target_layers"] = f"{LAYER_START}-{LAYER_END-1}"
+        
         wandb.init(
             project=args.wandb_project,
             name=run_name,
             settings=wandb.Settings(console="off"),
-            config={
-                "method": "continual_discriminative_late_layers",
-                "mode": args.mode,
-                "domains": domain_order,
-                "questions_per_domain": args.questions_per_domain,
-                "n_neighbors": args.n_neighbors,
-                "n_epochs": args.n_epochs,
-                "lr": args.lr,
-                "model": MODEL_NAME,
-                "neighbor_model": NEIGHBOR_MODEL_NAME,
-                "accumulation": not no_accumulation,
-                "baseline_only": args.baseline_only,
-                "target_layers": f"late ({LATE_LAYER_START}-{NUM_LAYERS-1})",
-            }
+            config=wandb_config,
         )
         print(f"W&B run: {run_name}")
     
     # Create LoRA adapter
-    target_modules = get_late_layers_target_modules(LATE_LAYER_START, NUM_LAYERS)
+    target_modules = get_late_layers_target_modules(LAYER_START, LAYER_END)
     print(f"Target modules ({len(target_modules)}): {target_modules[:4]}...")
     
     lora_config = LoraConfig(
         r=args.lora_r,
-        lora_alpha=16,
+        lora_alpha=args.lora_alpha,
         target_modules=target_modules,
         lora_dropout=0.0,
         bias="none",
@@ -1235,10 +1270,7 @@ def run_continual_experiment():
                 if no_distractors:
                     p_true_norm = p_true_raw
                 else:
-                    p_soft = normalize_p_true_sharpened(p_scores, temperature=args.norm_temperature)
-                    distractor_mean = float(np.mean(p_scores[1:])) if len(p_scores) > 1 else 1e-6
-                    p_ratio = p_true_raw / (p_true_raw + distractor_mean + 1e-8)
-                    p_true_norm = max(p_soft, p_ratio)
+                    p_true_norm = normalize_p_true_sharpened(p_scores, temperature=args.norm_temperature)
                 
                 # Map to bin and use as reported confidence
                 bin_mapper.add(p_true_norm)
@@ -1281,11 +1313,10 @@ def run_continual_experiment():
             
         elif should_do_ttt:
             # TTT mode - run training
-            baseline_correct = answers_match(baseline['answer'], qa, dataset_type=dataset_type)
-            
             ttt_result = train_single_question_discriminative(
                 question, train_model, optimizer, tokenizer,
-                n_neighbors=args.n_neighbors, n_epochs=args.n_epochs, dataset_type=dataset_type
+                n_neighbors=args.n_neighbors, n_epochs=args.n_epochs, dataset_type=dataset_type,
+                neighbors_only=args.neighbors_only
             )
             
             is_correct = answers_match(ttt_result['answer'], qa, dataset_type=dataset_type)
@@ -1348,6 +1379,15 @@ def run_continual_experiment():
             conf_prob = CONF_TO_PROB.get(confidence, 0.5)
             brier = (conf_prob - float(is_correct)) ** 2
             
+            # Compute P(True) even when skipping TTT (for consistent metrics)
+            with torch.no_grad():
+                skip_p_true = get_discriminative_confidence(
+                    question, answer, response, train_model, tokenizer,
+                    use_p_know=False, claimed_bin=confidence
+                )
+            brier_p_true = (skip_p_true - float(is_correct)) ** 2
+            bin_mapper.add(skip_p_true)  # Keep adaptive bin edges current
+            
             result = {
                 'question': question[:200],
                 'ground_truth': ground_truth,
@@ -1358,14 +1398,16 @@ def run_continual_experiment():
                 'ttt_answer': answer,
                 'ttt_confidence': confidence,
                 'ttt_correct': is_correct,
+                'ttt_p_true': skip_p_true,
+                'brier_p_true': brier_p_true,
                 'training_losses': [],
-                'neighbor_p_trues': [],
-                'avg_p_true': 0.5,
+                'neighbor_p_trues': [skip_p_true],
+                'avg_p_true': skip_p_true,
                 'ttt_skipped': True
             }
             avg_loss = 0.0
-            avg_p_true = 0.5
-            neighbor_p_trues = []
+            avg_p_true = skip_p_true
+            neighbor_p_trues = [skip_p_true]
         
         # Optional sparse correction: use ground-truth correctness to anchor confidence bins
         if (args.correction_every > 0
@@ -1444,7 +1486,8 @@ def run_continual_experiment():
         
         # Checkpoint every 50 questions
         if (i + 1) % 50 == 0:
-            with open(f'continual_ttt_{args.mode}_checkpoint.json', 'w') as f:
+            ckpt_suffix = args.run_name if args.run_name else args.mode
+            with open(f'results/continual_ttt_{ckpt_suffix}_checkpoint.json', 'w') as f:
                 json.dump(results, f, default=str)
             print(f"  [Checkpoint saved: {i+1} questions]")
         
@@ -1561,7 +1604,6 @@ def run_continual_experiment():
                     print(f"  {DOMAIN_CONFIG[d]['name']}: Acc={d_acc:.1%}  Brier={d_brier:.4f}")
             if not args.baseline_only:
                 print(f"  Avg P(True): {avg_p_true:.3f}")
-    
     # Final metrics
     ttt_metrics = compute_calibration_metrics(results, prefix="ttt")
     
@@ -1655,7 +1697,8 @@ def run_continual_experiment():
             pass
     
     # Save results
-    output_file = f"continual_ttt_{args.mode}_results.json"
+    name_suffix = args.run_name if args.run_name else args.mode
+    output_file = f"results/continual_ttt_{name_suffix}_results.json"
     save_data = {
         'config': vars(args),
         'domain_order': domain_order,
