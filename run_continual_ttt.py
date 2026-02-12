@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 # If shit hits the fan run this: mkdir -p /tmp/cursor-server-3hedna && ln -s /tmp/cursor-server-3hedna ~/.cursor-server
 """
-Continual Test-Time Training with Discriminative Calibration
-=============================================================
-Same as run_ttt_last_layers.py but across multiple domains for continual learning.
-
-Benchmark Modes:
-  - sequential: GSM8K → MMLU → ARC → TruthfulQA (domain shift)
-  - interleaved: Mixed questions from all domains
-  - return: Domain A → Domain B → Domain A (forgetting test)
+Continual Test-Time Training with Discriminative Calibration (FIXED VERSION)
+=============================================================================
+Fixed issues:
+1. Neighbor generation uses base model (no adapter drift)
+2. Gradient accumulation safety (zero_grad on failure)
+3. Removed sparse correction (unused)
+4. Removed P(Know) binary gate (continuous scaling)
+5. Fixed memory leaks (clone + empty_cache)
+6. MCQ extraction supports all letters (A-Z)
+7. Domain boundary detection skips interleaved mode
 
 Run with: python run_continual_ttt.py --mode sequential --questions_per_domain 100
 """
@@ -49,24 +51,19 @@ parser.add_argument('--use_fused_confidence', action='store_true',
                     help='Use fused confidence (p_true_norm * mean P(Know across neighbors)) to set target bin')
 parser.add_argument('--baseline_use_ptrue_norm', action='store_true',
                     help='In baseline_only mode, use P(True)_norm mapped to bin as the reported confidence')
+parser.add_argument('--temperature_scaling', action='store_true',
+                    help='Apply temperature scaling baseline (uses first 100 questions per domain as validation set)')
 parser.add_argument('--norm_temperature', type=float, default=0.7,
                     help='Temperature (<1 sharpen) when normalizing P(True) over answer+distractors')
-parser.add_argument('--correction_every', type=int, default=0,
-                    help='Every N questions, run a sparse supervised correction (0=off)')
-parser.add_argument('--correction_lr', type=float, default=1e-5,
-                    help='Learning rate for sparse corrections')
-parser.add_argument('--correction_steps', type=int, default=1,
-                    help='Steps for each correction application')
-parser.add_argument('--correction_bin_high', type=int, default=4,
-                    help='Target bin when the model is correct (anchor high confidence)')
-parser.add_argument('--correction_bin_low', type=int, default=0,
-                    help='Target bin when the model is incorrect (anchor low confidence)')
 parser.add_argument('--seed', type=int, default=42, help='Random seed')
 parser.add_argument('--num_bins', type=int, default=10, help='Number of confidence bins (rolling quantile edges)')
 parser.add_argument('--bin_window', type=int, default=500, help='Rolling window size for bin quantiles')
 parser.add_argument('--bin_min_count', type=int, default=100, help='Minimum samples before using quantile edges')
 parser.add_argument('--fixed_bins', action='store_true', help='Use fixed uniform bin edges instead of adaptive quantile edges')
 parser.add_argument('--neighbors_only', action='store_true', help='Train on generated neighbors only, exclude the input question from training')
+parser.add_argument('--reuse_mcq_options', action='store_true',
+                    help='For MCQ datasets, reuse original question MCQ options to normalize P(True) for neighbors '
+                         '(default: neighbors generate their own distractors)')
 # PH-gated TTT arguments
 parser.add_argument('--use_ph_gate', action='store_true', help='Enable PH-gated TTT (only train on detected drift)')
 parser.add_argument('--ph_delta', type=float, default=0.05, help='PH tolerance parameter')
@@ -78,6 +75,7 @@ parser.add_argument('--ttt_warmup', type=int, default=50, help='Force TTT for fi
 parser.add_argument('--layer_start', type=int, default=24, help='First layer to apply LoRA (default: 24 for late layers)')
 parser.add_argument('--layer_end', type=int, default=32, help='Last layer (exclusive) to apply LoRA (default: 32)')
 args = parser.parse_args()
+
 # Handle accumulation flags
 if args.no_accumulation:
     args.accumulation = False
@@ -137,24 +135,19 @@ DOMAIN_CONFIG = {
 }
 
 BENCHMARK_MODES = {
-    # TruthfulQA MC default
     'sequential': ['gsm8k', 'mmlu', 'arc', 'truthfulqa'],
     'reversed': ['truthfulqa', 'arc', 'mmlu', 'gsm8k'],
-    # TruthfulQA generation variant
     'sequential_gen': ['gsm8k', 'mmlu', 'arc', 'truthfulqa_gen'],
     'reversed_gen': ['truthfulqa_gen', 'arc', 'mmlu', 'gsm8k'],
-
     'sequential_hard': ['gsm8k', 'mmlu', 'arc', 'truthfulqa', 'hle'],
     'interleaved': ['gsm8k', 'mmlu', 'arc', 'truthfulqa'],
     'return_gsm8k': ['gsm8k', 'mmlu', 'gsm8k'],
     'return_mmlu': ['mmlu', 'arc', 'mmlu'],
-    # Shuffled orders to test domain order effects
     'truthful_first': ['truthfulqa', 'gsm8k', 'mmlu', 'arc'],
     'mmlu_first': ['mmlu', 'arc', 'truthfulqa', 'gsm8k'],
     'arc_first': ['arc', 'truthfulqa', 'gsm8k', 'mmlu'],
 }
 
-# Layer targeting: now configurable via --layer_start and --layer_end
 LAYER_START = args.layer_start
 LAYER_END = args.layer_end
 
@@ -193,8 +186,6 @@ print(f"Base model loaded to: {next(base_model.parameters()).device}")
 print(f"Model layers targeted: {LAYER_START}-{LAYER_END-1}")
 
 if NEIGHBOR_MODEL_NAME == MODEL_NAME:
-    # Important VRAM optimization: don't load the same model twice.
-    # Many runs set --neighbor_model == --model_name (default), so reusing saves a lot of memory.
     print(f"Neighbor model == base model ({NEIGHBOR_MODEL_NAME}); reusing base model/tokenizer for neighbor generation.")
     neighbor_tokenizer = tokenizer
     neighbor_model = base_model
@@ -233,12 +224,11 @@ class RollingBinMapper:
         self.num_bins = num_bins
         self.window = deque(maxlen=window_size)
         self.min_count = min_count
-        self.fixed = fixed  # If True, never update edges (use uniform)
+        self.fixed = fixed
         self.edges = np.linspace(0.0, 1.0, num_bins + 1)
 
     def add(self, value: float):
         self.window.append(float(value))
-        # Only update edges if not in fixed mode
         if not self.fixed and len(self.window) >= self.min_count:
             qs = np.linspace(0.0, 1.0, self.num_bins + 1)
             edges = np.quantile(np.clip(self.window, 0.0, 1.0), qs)
@@ -287,7 +277,6 @@ class PHGate:
         """Update with new entropy value. Returns True if TTT should run."""
         self.t += 1
         
-        # Update EMA
         if self.ema is None:
             self.ema = entropy
         else:
@@ -295,15 +284,12 @@ class PHGate:
         
         self.data.append(self.ema)
         
-        # Warmup: always TTT
         if self.t <= self.warmup:
             return True
         
-        # Bidirectional PH test
         segment_data = self.data[self.segment_start:]
         mean_t = np.mean(segment_data)
         
-        # Upward shift
         dev_up = self.ema - mean_t - self.ph_delta
         self.m_up += dev_up
         if len(segment_data) == 1:
@@ -312,7 +298,6 @@ class PHGate:
             self.m_up_min = min(self.m_up_min, self.m_up)
         ph_u = self.m_up - self.m_up_min
         
-        # Downward shift
         dev_down = mean_t - self.ema - self.ph_delta
         self.m_down += dev_down
         if len(segment_data) == 1:
@@ -321,16 +306,13 @@ class PHGate:
             self.m_down_min = min(self.m_down_min, self.m_down)
         ph_d = self.m_down - self.m_down_min
         
-        # Check trigger
         if ph_u > self.ph_threshold or ph_d > self.ph_threshold:
             self.ttt_remaining = self.ttt_burst
             self.total_triggers += 1
-            # Reset PH for next segment
             self.segment_start = len(self.data)
             self.m_up = self.m_down = 0.0
             self.m_up_min = self.m_down_min = 0.0
         
-        # Decide
         if self.ttt_remaining > 0:
             self.ttt_remaining -= 1
             return True
@@ -361,7 +343,6 @@ def generate_neighborhood_questions(question, model, tokenizer, n_neighbors=5):
     """Generate neighborhood questions. Simple prompt, minimal parsing."""
     all_questions = []
     
-    # Single prompt to generate all neighbors at once
     prompt = f"""Rewrite this question {n_neighbors} different ways:
 "{question}"
 
@@ -383,16 +364,13 @@ def generate_neighborhood_questions(question, model, tokenizer, n_neighbors=5):
     response = tokenizer.decode(outputs[0][inputs['input_ids'].shape[1]:], skip_special_tokens=True)
     del outputs
     
-    # Simple parse: each line that starts with a digit is a question
     for line in response.split('\n'):
         line = line.strip()
         if line and line[0].isdigit():
-            # Remove "1." or "1)" prefix
             q = line.lstrip('0123456789').lstrip('.):- ').strip()
             if len(q) > 15:
                 all_questions.append({'question': q, 'difficulty': 'similar'})
     
-    # Fallback to original
     while len(all_questions) < n_neighbors:
         all_questions.append({'question': question, 'difficulty': 'similar'})
     
@@ -405,13 +383,10 @@ def _is_too_similar(a: str, b: str, threshold: float = 0.8) -> bool:
     b_clean = normalize_answer(b)
     if not a_clean or not b_clean:
         return True
-    # Exact match
     if a_clean == b_clean:
         return True
-    # Check if one is substring of other
     if a_clean in b_clean or b_clean in a_clean:
         return True
-    # Character overlap ratio
     a_set = set(a_clean)
     b_set = set(b_clean)
     if not a_set or not b_set:
@@ -420,56 +395,44 @@ def _is_too_similar(a: str, b: str, threshold: float = 0.8) -> bool:
     return overlap > threshold
 
 
-def _extract_mc_options(question_text: str) -> dict:
-    """Extract multiple-choice options from question text.
-    
-    Returns dict like {'A': 'option text', 'B': 'option text', ...}
-    """
-    options = {}
-    for line in question_text.splitlines():
-        line = line.strip()
-        # Match patterns like "A. text", "A) text", "A: text"
-        m = re.match(r'^([A-D])[\.\)\:]?\s*(.+)', line)
-        if m:
-            letter = m.group(1).upper()
-            text = m.group(2).strip()
-            options[letter] = text
-    return options
-
 
 def _is_mc_answer(answer: str) -> str:
-    """Check if answer is a single MC letter (A/B/C/D). Returns the letter or None."""
+    """Check if answer is a single MC letter. Returns the letter or None.
+    Handles: 'B', 'B.', 'C. paralysis of the facial muscles...'
+    """
     answer_clean = answer.strip().upper().rstrip('.')
-    if answer_clean in ['A', 'B', 'C', 'D']:
+    if len(answer_clean) == 1 and answer_clean.isalpha():
         return answer_clean
+    # Handle "C. full option text" — letter + separator + text
+    m = re.match(r'^([A-Z])[\.\)\:]\s', answer.strip())
+    if m:
+        return m.group(1).upper()
     return None
 
 
-def generate_distractors(question, base_answer, model, tokenizer, k=2):
+
+def generate_distractors(question, base_answer, model, tokenizer, k=2, mc_options=None):
     """Generate k plausible alternative answers for a question.
     
-    For MCQ questions: uses the other options (A/B/C/D) as distractors.
+    For MCQ questions: uses the structured mc_options dict directly.
     For open-ended: generates plausible alternatives via the model.
+    
+    Args:
+        mc_options: Structured MCQ options dict {'A': 'text', ...} from dataset.
     """
     base_answer_str = str(base_answer).strip()
     
-    # Check if this is an MCQ answer (A/B/C/D)
     mc_letter = _is_mc_answer(base_answer_str)
-    if mc_letter:
-        # Extract options from the question
-        mc_options = _extract_mc_options(question)
-        if mc_options:
-            # Use other options as distractors (full text for stronger contrast)
-            distractors = []
-            for letter in ['A', 'B', 'C', 'D']:
-                if letter != mc_letter and letter in mc_options:
-                    distractors.append(f"{letter}. {mc_options[letter]}")
-                    if len(distractors) >= k:
-                        break
-            if distractors:
-                return distractors[:k]
+    if mc_letter and mc_options:
+        distractors = []
+        for letter in sorted(mc_options.keys()):
+            if letter != mc_letter:
+                distractors.append(f"{letter}. {mc_options[letter]}")
+                if len(distractors) >= k:
+                    break
+        if distractors:
+            return distractors[:k]
     
-    # For non-MCQ or if MC extraction failed: generate distractors
     is_numeric = bool(re.search(r'^-?\d', base_answer_str))
     
     if is_numeric:
@@ -509,25 +472,20 @@ Requirements:
         line = line.strip(" -\t")
         if not line:
             continue
-        # Strip numeric prefixes like "1." or "1)"
         line = re.sub(r"^\d+[\.)]\s*", "", line).strip()
         if not line:
             continue
         
-        # Drop if identical or too similar to base answer
         if _is_too_similar(line, base_answer_str):
             continue
         
-        # Drop if too similar to already collected distractors
         if any(_is_too_similar(line, c) for c in candidates):
             continue
         
-        # Keep concise answers only (for non-numeric)
         if len(line.split()) > 6 and not is_numeric:
             continue
         
         if is_numeric:
-            # For numeric answers, require that the line starts with a number
             if not re.match(r"^-?\d", line):
                 continue
         
@@ -535,21 +493,13 @@ Requirements:
         if len(candidates) >= k:
             break
 
-    # No fallbacks - return only actual distractors we generated
     return candidates[:k]
 
 
 def get_discriminative_confidence(question, answer, reasoning, model, tokenizer, use_p_know=False, claimed_bin=None, candidate_list=None):
-    """Get P(True) or P(Know) for the model's judgment.
-    
-    If use_p_know=True and claimed_bin is provided:
-      - Asks "Are you at least X% confident?" where X = claimed percentage
-      - Returns: claimed_confidence * P(Know)
-      - This scales down confidence when model doesn't believe its own claim
-    """
+    """Get P(True) or P(Know) for the model's judgment."""
     bin_to_pct = {i: (i + 0.5) / NUM_BINS for i in range(NUM_BINS)}
     
-    # Optional context of other candidate answers (for contrastive awareness)
     candidates_section = ""
     if candidate_list:
         candidates_lines = []
@@ -558,7 +508,6 @@ def get_discriminative_confidence(question, answer, reasoning, model, tokenizer,
         candidates_section = "Here are some brainstormed answers:\n" + "\n".join(candidates_lines) + "\n\n"
     
     if use_p_know:
-        # P(Know): Check if model believes its claimed confidence
         if claimed_bin is not None:
             claimed_pct = bin_to_pct.get(claimed_bin, 0.50)
             pct_display = int(claimed_pct * 100)
@@ -567,15 +516,13 @@ def get_discriminative_confidence(question, answer, reasoning, model, tokenizer,
 Are you at least {pct_display}% confident that you know the correct answer to this question?
 Please respond with only "True" or "False"."""
         else:
-            # Fallback to 100% if no claimed_bin provided
             claimed_pct = 1.0
             verification_prompt = f"""Question: {question}
 
 Are you 100% confident that you know the correct answer to this question?
 Please respond with only "True" or "False"."""
     else:
-        # P(True): "Is this specific answer correct?" (answer verification)
-        claimed_pct = None  # Not used for P(True)
+        claimed_pct = None
         verification_prompt = f"""Question: {question}
 
 Proposed Solution:
@@ -607,16 +554,8 @@ Is this answer correct? Please respond with only "True" or "False"."""
     p_know = probs[0].item()
     
     if use_p_know and claimed_pct is not None:
-        # Binary gate with 70% threshold
-        # If P(Know) > 0.7: model strongly believes its claim, keep it
-        # If P(Know) <= 0.7: model doubts, scale down
-        if p_know > 0.7:
-            return claimed_pct  # Keep claimed confidence
-        else:
-            scaled_confidence = claimed_pct * p_know
-            return scaled_confidence
+        return claimed_pct * p_know
     else:
-        # P(True) mode: return raw probability
         return p_know
 
 
@@ -748,72 +687,106 @@ def get_baseline_answer(question, model, tokenizer):
 
 
 # =============================================================================
+# TEMPERATURE SCALING
+# =============================================================================
+
+def apply_temperature_scaling(results, temperature=1.0):
+    """
+    Apply temperature scaling to confidence bins.
+    
+    Temperature scaling maps confidence probabilities through a temperature parameter:
+    - T < 1: Sharpens (more confident)
+    - T = 1: No change
+    - T > 1: Smooths (less confident)
+    """
+    scaled_results = []
+    for r in results:
+        original_conf = r['confidence']
+        original_prob = CONF_TO_PROB[original_conf]
+        
+        if temperature != 1.0:
+            # Map to logit space, scale, map back
+            epsilon = 1e-6
+            p = max(epsilon, min(1 - epsilon, original_prob))
+            logit = np.log(p / (1 - p))
+            scaled_logit = logit / temperature
+            scaled_prob = 1 / (1 + np.exp(-scaled_logit))
+            
+            # Map back to bin
+            scaled_bin = bin_mapper.to_bin(scaled_prob)
+        else:
+            scaled_bin = original_conf
+        
+        r_scaled = r.copy()
+        r_scaled['confidence'] = scaled_bin
+        scaled_results.append(r_scaled)
+    
+    return scaled_results
+
+
+def find_optimal_temperature(val_results, temperature_range=None):
+    """
+    Find optimal temperature on validation set by minimizing ECE.
+    
+    Args:
+        val_results: List of results with 'confidence' and 'correct' keys
+        temperature_range: List of temperatures to try
+    
+    Returns:
+        Best temperature value
+    """
+    if temperature_range is None:
+        temperature_range = [0.3, 0.5, 0.7, 1.0, 1.5, 2.0, 3.0]
+    
+    best_temp = 1.0
+    best_ece = float('inf')
+    temp_results = []
+    
+    for temp in temperature_range:
+        scaled_results = apply_temperature_scaling(val_results, temperature=temp)
+        metrics = compute_calibration_metrics(scaled_results, prefix="")
+        ece = metrics['ece']
+        temp_results.append((temp, ece))
+        
+        if ece < best_ece:
+            best_ece = ece
+            best_temp = temp
+    
+    # Print all results with best marked
+    for temp, ece in temp_results:
+        marker = " *BEST*" if temp == best_temp else ""
+        print(f"  Temp={temp:.2f} → ECE={ece:.4f}{marker}")
+    
+    print(f"\nOptimal temperature: T={best_temp:.2f} (ECE={best_ece:.4f})")
+    return best_temp
+
+
+# =============================================================================
 # DISCRIMINATIVE TTT TRAINING
 # =============================================================================
 
-def parse_mc_options(question_text):
-    """Extract multiple-choice options from question text."""
-    opts = []
-    for line in question_text.splitlines():
-        line = line.strip()
-        m = re.match(r'^([A-D])[\.\)]\s*(.+)', line)
-        if m:
-            opts.append(m.group(2).strip())
-    return opts
-
-
-def best_option_first(answer_text, options):
-    """Reorder options so that the best match to the answer is first."""
-    norm_ans = normalize_answer(answer_text)
-    best_idx = 0
-    best_score = -1
-    for i, opt in enumerate(options):
-        norm_opt = normalize_answer(opt)
-        # token overlap
-        toks_ans = set(norm_ans.split())
-        toks_opt = set(norm_opt.split())
-        if toks_ans and toks_opt:
-            overlap = len(toks_ans & toks_opt) / max(len(toks_ans), len(toks_opt))
-        else:
-            overlap = 0
-        if overlap > best_score:
-            best_score = overlap
-            best_idx = i
-    if best_idx == 0:
-        return options
-    return [options[best_idx]] + [opt for i, opt in enumerate(options) if i != best_idx]
-
-
-def train_single_question_discriminative(question, train_model, optimizer, tokenizer, n_neighbors=5, n_epochs=3, dataset_type="auto", neighbors_only=False):
+def train_single_question_discriminative(question, train_model, optimizer, tokenizer, n_neighbors=5, n_epochs=3, dataset_type="auto", neighbors_only=False, mc_options=None):
     """Train on a single question using discriminative P(True) as pseudo-label.
     
-    Training data includes:
-    - The input question itself (included unless neighbors_only=True)
-    - Plus n_neighbors generated similar questions (if n_neighbors > 0)
-    
-    So n_neighbors=0, neighbors_only=False → train on input only (1 sample)
-       n_neighbors=3, neighbors_only=False → train on input + 3 neighbors (4 samples)
-       n_neighbors=3, neighbors_only=True  → train on 3 neighbors only (no input)
+    Args:
+        mc_options: Structured MCQ options dict {'A': 'text', ...} from dataset.
+                    Used directly for P(True) normalization instead of regex parsing.
     """
     
     bin_digit_tokens = get_bin_digit_tokens(tokenizer)
     pknow_values = []
     
-    # Build list of questions to train on: input question + neighbors
     questions_to_train = []
     if not neighbors_only:
-        questions_to_train.append({'question': question, 'difficulty': 'input'})  # Include input
+        questions_to_train.append({'question': question, 'difficulty': 'input'})
     
     train_model.eval()
     if n_neighbors > 0:
-        # Use disable_adapter() to generate neighbors from the clean base model,
-        # preventing accumulated LoRA weights from affecting neighbor quality
+        # FIXED: Always use base model (without adapter) for consistent neighbor generation
         with train_model.disable_adapter():
-            with torch.no_grad():
-                neighbors = generate_neighborhood_questions(question, neighbor_model, neighbor_tokenizer, n_neighbors)
+            neighbors = generate_neighborhood_questions(question, train_model, tokenizer, n_neighbors)
         questions_to_train.extend(neighbors)
     
-    # Safety: if neighbors_only but n_neighbors=0, fall back to input question
     if len(questions_to_train) == 0:
         questions_to_train.append({'question': question, 'difficulty': 'input'})
     
@@ -822,6 +795,12 @@ def train_single_question_discriminative(question, train_model, optimizer, token
     for n in questions_to_train:
         q = n['question'] if isinstance(n, dict) else n
         difficulty = n.get('difficulty', 'similar') if isinstance(n, dict) else 'similar'
+        
+        # When reusing MCQ options, append choices to neighbor questions
+        # so the model answers with a letter (consistent with original MCQ format)
+        if mc_options and args.reuse_mcq_options and difficulty != 'input':
+            choices = "\n".join(f"{ltr}. {mc_options[ltr]}" for ltr in sorted(mc_options))
+            q = f"{q}\n{choices}"
         
         prompt = create_qa_prompt(q)
         messages = [{"role": "user", "content": prompt}]
@@ -838,8 +817,8 @@ def train_single_question_discriminative(question, train_model, optimizer, token
         
         response = tokenizer.decode(outputs[0][inputs['input_ids'].shape[1]:], skip_special_tokens=True)
         answer = extract_answer(response)
-        claimed_conf = extract_confidence(response)  # Get claimed confidence bin
-        # Epistemic component: P(Know) for claimed bin
+        claimed_conf = extract_confidence(response)
+        
         p_know = get_discriminative_confidence(
             q,
             answer,
@@ -852,22 +831,21 @@ def train_single_question_discriminative(question, train_model, optimizer, token
         pknow_values.append(p_know)
         del outputs
         
-        # Generate candidates and compute normalized P(True)
-        # If MCQ, use option text; else generated distractors (BUG 4 fix: use q not question)
-        mc_opts = _extract_mc_options(q) if dataset_type in ['mmlu', 'arc', 'truthfulqa_mc'] else {}
-        if mc_opts:
-            # Ordered by letter
-            ordered = [f"{ltr}. {mc_opts[ltr]}" for ltr in sorted(mc_opts.keys())]
-            candidates = ordered
-            # Map model answer letter to full text if possible
-            ans_letter = answer.strip().upper().rstrip('.')
-            answer_full = mc_opts.get(ans_letter, answer)
-            candidates.insert(0, f"{ans_letter}. {answer_full}")
+        # Use structured mc_options when the answer is a valid MCQ letter;
+        # otherwise fall back to distractor generation.
+        use_mc = mc_options if (mc_options and (args.reuse_mcq_options or difficulty == 'input')) else None
+        ans_letter = _is_mc_answer(answer) if use_mc else None
+        if use_mc and ans_letter and ans_letter in use_mc:
+            # Answer at index 0 (required by normalize_p_true_sharpened),
+            # then remaining options in sorted order — no duplicates.
+            candidates = [f"{ans_letter}. {use_mc[ans_letter]}"]
+            for ltr in sorted(use_mc.keys()):
+                if ltr != ans_letter:
+                    candidates.append(f"{ltr}. {use_mc[ltr]}")
         else:
-            distractors = generate_distractors(q, answer, train_model, tokenizer, k=args.k_distractors)
+            distractors = generate_distractors(q, answer, train_model, tokenizer, k=args.k_distractors, mc_options=mc_options)
             candidates = [answer] + distractors
         
-        # Fallback flag: if no distractors, normalization is trivial → use raw P(True)
         no_distractors = len(candidates) <= 1
         
         p_scores = []
@@ -876,19 +854,18 @@ def train_single_question_discriminative(question, train_model, optimizer, token
                 p_cand = get_discriminative_confidence(
                     q,
                     cand,
-                    response,  # reuse reasoning; question/answer checked in prompt
+                    response,
                     train_model,
                     tokenizer,
-                    use_p_know=False,  # force P(True) for normalization
+                    use_p_know=False,
                     claimed_bin=None,
                     candidate_list=candidates,
                 )
                 p_scores.append(p_cand)
         p_true_raw = p_scores[0]
         
-        # If no distractors, normalization is trivial (would be 1.0), fall back to raw
         if no_distractors:
-            p_true_norm = p_true_raw  # Fallback: use raw when no contrast
+            p_true_norm = p_true_raw
         else:
             p_true_norm = normalize_p_true_sharpened(p_scores, temperature=args.norm_temperature)
         
@@ -911,15 +888,16 @@ def train_single_question_discriminative(question, train_model, optimizer, token
         nd['p_fused'] = nd['p_true_norm'] * p_know_mean
         
         if args.use_raw_ptrue or nd['no_distractors']:
-            p_for_bin = nd['p_true_raw']   # raw P(True)
+            p_for_bin = nd['p_true_raw']
         elif args.use_p_know:
-            p_for_bin = nd['p_know']       # P(Know) as training target
+            p_for_bin = nd['p_know']
         elif args.use_fused_confidence:
-            p_for_bin = nd['p_fused']      # fused P(True) * P(Know)
+            p_for_bin = nd['p_fused']
         else:
-            p_for_bin = nd['p_true_norm']  # normalized P(True)
+            p_for_bin = nd['p_true_norm']
 
-        bin_mapper.add(p_for_bin)
+        if nd.get('difficulty') == 'input':
+            bin_mapper.add(p_for_bin)
         nd['target_bin'] = p_true_to_bin(p_for_bin)
     
     train_model.train()
@@ -942,7 +920,6 @@ def train_single_question_discriminative(question, train_model, optimizer, token
             input_text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
             inputs = tokenizer(input_text, return_tensors="pt", truncation=True, max_length=1024).to(train_model.device)
             
-            # Try greedy first, then retry with sampling if format fails
             max_retries = 3
             outputs = None
             conf_mask = None
@@ -950,10 +927,8 @@ def train_single_question_discriminative(question, train_model, optimizer, token
             for retry in range(max_retries):
                 with torch.no_grad():
                     if retry == 0:
-                        # First try: greedy decoding
                         outputs = train_model.generate(**inputs, **generation_kwargs)
                     else:
-                        # Retry with sampling
                         outputs = train_model.generate(
                             **inputs,
                             max_new_tokens=200,
@@ -962,26 +937,19 @@ def train_single_question_discriminative(question, train_model, optimizer, token
                             pad_token_id=tokenizer.eos_token_id
                         )
                 
-                response_tokens = outputs[:, inputs['input_ids'].shape[1]:]
+                # FIXED: Clone to detach from computation graph
+                response_tokens = outputs[:, inputs['input_ids'].shape[1]:].clone()
                 conf_mask = create_confidence_mask(response_tokens, tokenizer)
                 
                 if conf_mask.sum() > 0:
-                    break  # Success
+                    break
                 
-                del outputs
+                # FIXED: Clean up failed attempt
+                del outputs, response_tokens, conf_mask
+                torch.cuda.empty_cache()
                 outputs = None
             
-            if outputs is None or conf_mask.sum() == 0:
-                # All retries failed
-                if outputs is not None:
-                    resp_text = tokenizer.decode(response_tokens[0], skip_special_tokens=True)
-                    conf_idx = resp_text.lower().find("confidence:")
-                    if conf_idx != -1:
-                        conf_section = resp_text[conf_idx:conf_idx+30]
-                        print(f"  [MASK FAIL after {max_retries} retries] conf_section='{conf_section}'")
-                    else:
-                        print(f"  [MASK FAIL after {max_retries} retries] No 'Confidence:' (len={len(resp_text)})")
-                    del outputs
+            if outputs is None:
                 continue
             
             labels = outputs.clone()
@@ -1012,12 +980,15 @@ def train_single_question_discriminative(question, train_model, optimizer, token
             
             del outputs
         
+        # FIXED: Added gradient cleanup safety
         if valid_samples > 0:
             for param in train_model.parameters():
                 if param.grad is not None:
                     param.grad.div_(valid_samples)
             torch.nn.utils.clip_grad_norm_(train_model.parameters(), max_norm=1.0)
             optimizer.step()
+        else:
+            optimizer.zero_grad()
         
         training_losses.append(np.mean(epoch_losses) if epoch_losses else 0.0)
     
@@ -1036,7 +1007,6 @@ def train_single_question_discriminative(question, train_model, optimizer, token
     answer = extract_answer(response)
     claimed_conf = extract_confidence(response)
     
-    # Compute P(True) or P(Know) for the final answer
     with torch.no_grad():
         final_p_true = get_discriminative_confidence(question, answer, response, train_model, tokenizer, 
                                                      use_p_know=args.use_p_know, claimed_bin=claimed_conf)
@@ -1050,7 +1020,7 @@ def train_single_question_discriminative(question, train_model, optimizer, token
         'response': response,
         'neighbors': neighbor_data,
         'training_losses': training_losses,
-        'p_true': final_p_true,  # P(True) for final answer
+        'p_true': final_p_true,
         'neighbor_p_know_mean': neighbor_p_know_mean,
         'neighbor_p_fused_mean': neighbor_p_fused_mean
     }
@@ -1063,9 +1033,6 @@ def train_single_question_discriminative(question, train_model, optimizer, token
 def run_continual_experiment():
     """Run continual TTT experiment across multiple domains."""
     
-    bin_digit_tokens = get_bin_digit_tokens(tokenizer)
-    
-    # Determine domain order
     if args.mode == 'custom' and args.domains:
         domain_order = args.domains
     else:
@@ -1092,7 +1059,6 @@ def run_continual_experiment():
         print(f"PH Gate: ON (delta={args.ph_delta}, threshold={args.ph_threshold}, burst={args.ttt_burst})")
     print()
     
-    # Load all datasets
     print("Loading datasets...")
     all_data = {}
     for domain in set(domain_order):
@@ -1107,7 +1073,6 @@ def run_continual_experiment():
         all_data[domain] = data
         print(f"  {config['name']}: {len(data)} questions")
     
-    # Build question sequence
     if args.mode == 'interleaved':
         questions = []
         domain_indices = {d: 0 for d in set(domain_order)}
@@ -1131,7 +1096,181 @@ def run_continual_experiment():
     
     print(f"Total questions: {len(questions)}")
     
-    # Initialize W&B
+    # =============================================================================
+    # TEMPERATURE SCALING MODE
+    # =============================================================================
+    
+    if args.temperature_scaling:
+        print(f"\n{'='*70}")
+        print("RUNNING TEMPERATURE SCALING BASELINE")
+        print(f"{'='*70}\n")
+        
+        # Split: first 100 questions per domain for validation, rest for test
+        val_questions = []
+        test_questions = []
+        
+        for domain in set(domain_order):
+            domain_qs = [q for q in questions if q['domain'] == domain]
+            val_size = min(100, len(domain_qs) // 4)  # Use 25% or 100, whichever is smaller
+            val_questions.extend(domain_qs[:val_size])
+            test_questions.extend(domain_qs[val_size:])
+        
+        print(f"Validation set: {len(val_questions)} questions")
+        print(f"Test set: {len(test_questions)} questions\n")
+        
+        # Get baseline predictions on validation set
+        print("Phase 1: Calibrating temperature on validation set...")
+        val_results = []
+        for qa in tqdm(val_questions, desc="Validation"):
+            baseline = get_baseline_answer(qa['question'], base_model, tokenizer)
+            is_correct = answers_match(baseline['answer'], qa, dataset_type=qa['dataset_type'])
+            val_results.append({
+                'confidence': baseline['confidence'],
+                'correct': is_correct
+            })
+        
+        # Find optimal temperature
+        print("\nSearching for optimal temperature...")
+        optimal_temp = find_optimal_temperature(val_results)
+        
+        # Apply to test set
+        print(f"\nPhase 2: Applying T={optimal_temp:.2f} to test set...")
+        test_results = []
+        domain_stats = defaultdict(lambda: {'correct': 0, 'total': 0, 'brier_sum': 0})
+        
+        for qa in tqdm(test_questions, desc="Testing"):
+            baseline = get_baseline_answer(qa['question'], base_model, tokenizer)
+            is_correct = answers_match(baseline['answer'], qa, dataset_type=qa['dataset_type'])
+            
+            domain = qa['domain']
+            domain_stats[domain]['correct'] += int(is_correct)
+            domain_stats[domain]['total'] += 1
+            
+            test_results.append({
+                'question': qa['question'][:200],
+                'ground_truth': qa['ground_truth_answer'],
+                'domain': domain,
+                'answer': baseline['answer'],
+                'confidence': baseline['confidence'],
+                'correct': is_correct
+            })
+        
+        # Apply temperature scaling
+        scaled_results = apply_temperature_scaling(test_results, temperature=optimal_temp)
+        
+        # Recompute brier scores after scaling
+        for r in scaled_results:
+            conf_prob = CONF_TO_PROB[r['confidence']]
+            r['brier'] = (conf_prob - float(r['correct'])) ** 2
+            domain_stats[r['domain']]['brier_sum'] += r['brier']
+        
+        # Compute metrics
+        final_metrics = compute_calibration_metrics(scaled_results, prefix="")
+        
+        # Per-domain metrics
+        domain_metrics = {}
+        for domain in set([r['domain'] for r in scaled_results]):
+            domain_results = [r for r in scaled_results if r['domain'] == domain]
+            domain_cal = compute_calibration_metrics(domain_results, prefix="")
+            domain_metrics[domain] = {
+                'acc': domain_stats[domain]['correct'] / domain_stats[domain]['total'],
+                'brier': domain_stats[domain]['brier_sum'] / domain_stats[domain]['total'],
+                'ece': domain_cal['ece'],
+                'auroc': domain_cal['auroc'],
+                'count': domain_stats[domain]['total']
+            }
+        
+        # Print results
+        print(f"\n{'='*70}")
+        print("TEMPERATURE SCALING RESULTS")
+        print(f"{'='*70}")
+        print(f"Optimal Temperature: {optimal_temp:.2f}")
+        print(f"Overall ECE: {final_metrics['ece']:.4f}")
+        if final_metrics['auroc']:
+            print(f"Overall AUROC: {final_metrics['auroc']:.4f}")
+        
+        total_correct = sum(d['correct'] for d in domain_stats.values())
+        total_count = sum(d['total'] for d in domain_stats.values())
+        overall_acc = total_correct / total_count
+        overall_brier = sum(d['brier_sum'] for d in domain_stats.values()) / total_count
+        
+        print(f"Overall Accuracy: {total_correct}/{total_count} = {overall_acc:.1%}")
+        print(f"Overall Brier: {overall_brier:.4f}")
+        
+        print("\nPer-Domain Results:")
+        for domain in domain_metrics:
+            m = domain_metrics[domain]
+            auroc_str = f"{m['auroc']:.4f}" if m['auroc'] else "N/A"
+            print(f"  {DOMAIN_CONFIG[domain]['name']:12} Acc={m['acc']:.1%}  Brier={m['brier']:.4f}  ECE={m['ece']:.4f}  AUROC={auroc_str}")
+        
+        print(f"\nPer-bin accuracy:")
+        for b, stats in final_metrics['bin_stats'].items():
+            if stats['count'] > 0:
+                acc_str = f"{stats['accuracy']:.1%}" if stats['accuracy'] is not None else "N/A"
+                print(f"  Bin{b} (expect {stats['expected']:.0%}): {acc_str} ({stats['count']} samples)")
+        
+        # Save results
+        if use_wandb:
+            wandb.init(
+                project=args.wandb_project,
+                name=args.run_name or "temp_scaling",
+                config={
+                    'method': 'temperature_scaling',
+                    'optimal_temperature': optimal_temp,
+                    'val_size': len(val_questions),
+                    'test_size': len(test_questions)
+                }
+            )
+            
+            wandb.log({
+                'final/ece': final_metrics['ece'],
+                'final/auroc': final_metrics['auroc'],
+                'final/acc': overall_acc,
+                'final/brier': overall_brier,
+                'optimal_temperature': optimal_temp
+            })
+            
+            for domain in domain_metrics:
+                m = domain_metrics[domain]
+                wandb.log({
+                    f'final/{domain}_ece': m['ece'],
+                    f'final/{domain}_auroc': m['auroc'],
+                    f'final/{domain}_acc': m['acc'],
+                    f'final/{domain}_brier': m['brier']
+                })
+            
+            wandb.finish()
+        
+        # Save to file
+        name_suffix = args.run_name if args.run_name else 'temp_scaling'
+        output_file = f"results/temp_scaling_{name_suffix}_results.json"
+        with open(output_file, 'w') as f:
+            json.dump({
+                'config': {
+                    'method': 'temperature_scaling',
+                    'optimal_temperature': optimal_temp,
+                    'val_size': len(val_questions),
+                    'test_size': len(test_questions)
+                },
+                'final_metrics': {
+                    'ece': final_metrics['ece'],
+                    'auroc': final_metrics['auroc'],
+                    'accuracy': overall_acc,
+                    'brier': overall_brier
+                },
+                'domain_metrics': domain_metrics,
+                'results': scaled_results
+            }, f, indent=2, default=str)
+        
+        print(f"\nResults saved to {output_file}")
+        print(f"{'='*70}\n")
+        
+        return scaled_results
+    
+    # =============================================================================
+    # NORMAL TTT MODE (Continue with existing code)
+    # =============================================================================
+    
     if use_wandb:
         if args.run_name:
             run_name = args.run_name
@@ -1141,7 +1280,6 @@ def run_continual_experiment():
             baseline_str = "BASELINE_" if args.baseline_only else ""
             run_name = f"{baseline_str}CONT_{args.mode}_{accum_str}_nb{args.n_neighbors}_{timestamp}"
         
-        # Log all args so every ablation parameter is visible in W&B
         wandb_config = vars(args).copy()
         wandb_config["method"] = "continual_discriminative_late_layers"
         wandb_config["domains"] = domain_order
@@ -1155,7 +1293,6 @@ def run_continual_experiment():
         )
         print(f"W&B run: {run_name}")
     
-    # Create LoRA adapter
     target_modules = get_late_layers_target_modules(LAYER_START, LAYER_END)
     print(f"Target modules ({len(target_modules)}): {target_modules[:4]}...")
     
@@ -1172,7 +1309,6 @@ def run_continual_experiment():
     
     optimizer = torch.optim.AdamW(train_model.parameters(), lr=args.lr) if not args.baseline_only else None
     
-    # Tracking
     results = []
     domain_stats = defaultdict(lambda: {'correct': 0, 'total': 0, 'brier_sum': 0})
     global_correct = 0
@@ -1187,7 +1323,6 @@ def run_continual_experiment():
         'avg_p_true': []
     }
     
-    # Initialize PH gate for gated TTT
     ph_gate = None
     if args.use_ph_gate:
         ph_gate = PHGate(
@@ -1200,22 +1335,18 @@ def run_continual_experiment():
         print(f"PH Gate enabled: burst={args.ttt_burst}, warmup={args.ttt_warmup}, "
               f"delta={args.ph_delta}, threshold={args.ph_threshold}, ema_alpha={args.ema_alpha}")
     
-    # Main loop
     for i, qa in enumerate(tqdm(questions, desc=f"Continual TTT ({args.mode})")):
         question = qa['question']
         ground_truth = qa['ground_truth_answer']
         domain = qa['domain']
         dataset_type = qa['dataset_type']
         
-        # Determine if TTT should run (PH gate check)
-        should_do_ttt = True  # Default: always TTT
+        should_do_ttt = True
         if args.use_ph_gate and not args.baseline_only:
             with train_model.disable_adapter():
                 entropy = compute_question_entropy(question, train_model, tokenizer)
             should_do_ttt = ph_gate.update(entropy)
         
-        # Reset LoRA weights if no accumulation (only when doing TTT)
-        # NOTE: Must reinit lora_A (Kaiming) and zero lora_B. If both are zeroed, gradients are 0!
         if no_accumulation and not args.baseline_only and should_do_ttt:
             with torch.no_grad():
                 for name, param in train_model.named_parameters():
@@ -1225,29 +1356,31 @@ def run_continual_experiment():
                         param.zero_()
             optimizer = torch.optim.AdamW(train_model.parameters(), lr=args.lr)
         
-        # Baseline answer
         with train_model.disable_adapter():
             baseline = get_baseline_answer(question, train_model, tokenizer)
         baseline_correct = answers_match(baseline['answer'], qa, dataset_type=dataset_type)
         
         if args.baseline_only:
-            # Baseline only mode - also compute P(True) for comparison
             is_correct = baseline_correct
 
-            # Compute P(True) or P(Know) for baseline answer (no training, just discriminative eval)
             with torch.no_grad():
                 baseline_p_true = get_discriminative_confidence(
                     question, baseline['answer'], baseline['response'], train_model, tokenizer,
                     use_p_know=args.use_p_know, claimed_bin=baseline['confidence']
                 )
 
-            # Optionally override confidence bin with P(True)_norm (no training)
             if args.baseline_use_ptrue_norm:
-                # Build candidates with distractors and compute normalized P(True)
-                distractors = generate_distractors(question, baseline['answer'], train_model, tokenizer, k=args.k_distractors)
-                candidates = [baseline['answer']] + distractors
+                mc_opts = qa.get('mc_options')
+                ans_letter = _is_mc_answer(baseline['answer']) if mc_opts else None
+                if mc_opts and ans_letter and ans_letter in mc_opts:
+                    candidates = [f"{ans_letter}. {mc_opts[ans_letter]}"]
+                    for ltr in sorted(mc_opts.keys()):
+                        if ltr != ans_letter:
+                            candidates.append(f"{ltr}. {mc_opts[ltr]}")
+                else:
+                    distractors = generate_distractors(question, baseline['answer'], train_model, tokenizer, k=args.k_distractors, mc_options=mc_opts)
+                    candidates = [baseline['answer']] + distractors
                 
-                # Fallback flag: if no distractors, normalization is trivial → use raw P(True)
                 no_distractors = len(candidates) <= 1
                 
                 with torch.no_grad():
@@ -1266,26 +1399,23 @@ def run_continual_experiment():
                         p_scores.append(p_cand)
                 p_true_raw = p_scores[0]
                 
-                # If no distractors, use raw P(True) as fallback
                 if no_distractors:
                     p_true_norm = p_true_raw
                 else:
                     p_true_norm = normalize_p_true_sharpened(p_scores, temperature=args.norm_temperature)
                 
-                # Map to bin and use as reported confidence
                 bin_mapper.add(p_true_norm)
                 baseline_conf_bin = p_true_to_bin(p_true_norm)
                 conf_prob = CONF_TO_PROB.get(baseline_conf_bin, 0.5)
                 brier = (conf_prob - float(is_correct)) ** 2
-                brier_p_true = (p_true_norm - float(is_correct)) ** 2  # Using p_true_norm for comparison
-                # Override for logging/outputs
+                brier_p_true = (p_true_norm - float(is_correct)) ** 2
                 baseline_conf_for_log = baseline_conf_bin
                 neighbor_p_trues = [p_true_norm]
                 avg_p_true = p_true_norm
             else:
                 conf_prob = CONF_TO_PROB.get(baseline['confidence'], 0.5)
                 brier = (conf_prob - float(is_correct)) ** 2
-                brier_p_true = (baseline_p_true - float(is_correct)) ** 2  # Brier using P(True)
+                brier_p_true = (baseline_p_true - float(is_correct)) ** 2
                 baseline_conf_for_log = baseline['confidence']
                 neighbor_p_trues = []
                 avg_p_true = baseline_p_true
@@ -1296,7 +1426,7 @@ def run_continual_experiment():
                 'domain': domain,
                 'baseline_answer': baseline['answer'],
                 'baseline_confidence': baseline_conf_for_log,
-                'baseline_p_true': baseline_p_true,  # Record P(True) for comparison
+                'baseline_p_true': baseline_p_true,
                 'baseline_correct': is_correct,
                 'ttt_answer': baseline['answer'],
                 'ttt_confidence': baseline_conf_for_log,
@@ -1305,23 +1435,19 @@ def run_continual_experiment():
                 'training_losses': [],
                 'neighbor_p_trues': neighbor_p_trues,
                 'avg_p_true': avg_p_true,
-                'brier_p_true': brier_p_true  # Track Brier with P(True)
+                'brier_p_true': brier_p_true
             }
             avg_loss = 0.0
-            # avg_p_true already set above
-            # neighbor_p_trues already set above
             
         elif should_do_ttt:
-            # TTT mode - run training
             ttt_result = train_single_question_discriminative(
                 question, train_model, optimizer, tokenizer,
                 n_neighbors=args.n_neighbors, n_epochs=args.n_epochs, dataset_type=dataset_type,
-                neighbors_only=args.neighbors_only
+                neighbors_only=args.neighbors_only, mc_options=qa.get('mc_options')
             )
             
             is_correct = answers_match(ttt_result['answer'], qa, dataset_type=dataset_type)
             
-            # Use verbalized confidence for main Brier
             conf_prob = CONF_TO_PROB.get(ttt_result['confidence'], 0.5)
             brier = (conf_prob - float(is_correct)) ** 2
             
@@ -1332,7 +1458,7 @@ def run_continual_experiment():
             avg_p_true = np.mean(neighbor_p_trues) if neighbor_p_trues else 0.5
             avg_loss = np.mean(ttt_result['training_losses']) if ttt_result['training_losses'] else 0.0
             
-            brier_p_true = (ttt_result['p_true'] - float(is_correct)) ** 2  # Brier using P(True)
+            brier_p_true = (ttt_result['p_true'] - float(is_correct)) ** 2
             
             result = {
                 'question': question[:200],
@@ -1342,12 +1468,12 @@ def run_continual_experiment():
                 'baseline_confidence': baseline['confidence'],
                 'baseline_correct': baseline_correct,
                 'ttt_answer': ttt_result['answer'],
-                'ttt_confidence': ttt_result['confidence'],  # Verbalized confidence bin
+                'ttt_confidence': ttt_result['confidence'],
                 'ttt_correct': is_correct,
-                'ttt_p_true': ttt_result['p_true'],  # Store P(True) for final answer
+                'ttt_p_true': ttt_result['p_true'],
                 'ttt_p_know_mean': ttt_result.get('neighbor_p_know_mean', 0.5),
                 'ttt_p_fused_mean': ttt_result.get('neighbor_p_fused_mean', avg_p_true),
-                'brier_p_true': brier_p_true,  # Brier using P(True) for comparison
+                'brier_p_true': brier_p_true,
                 'training_losses': ttt_result['training_losses'],
                 'neighbor_p_trues': neighbor_p_trues,
                 'avg_p_true': avg_p_true,
@@ -1355,7 +1481,6 @@ def run_continual_experiment():
             }
         
         else:
-            # Gated: Skip TTT, use model with adapter (no training)
             prompt = create_qa_prompt(question)
             messages = [{"role": "user", "content": prompt}]
             input_text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
@@ -1379,14 +1504,12 @@ def run_continual_experiment():
             conf_prob = CONF_TO_PROB.get(confidence, 0.5)
             brier = (conf_prob - float(is_correct)) ** 2
             
-            # Compute P(True) even when skipping TTT (for consistent metrics)
             with torch.no_grad():
                 skip_p_true = get_discriminative_confidence(
                     question, answer, response, train_model, tokenizer,
                     use_p_know=False, claimed_bin=confidence
                 )
             brier_p_true = (skip_p_true - float(is_correct)) ** 2
-            bin_mapper.add(skip_p_true)  # Keep adaptive bin edges current
             
             result = {
                 'question': question[:200],
@@ -1409,58 +1532,8 @@ def run_continual_experiment():
             avg_p_true = skip_p_true
             neighbor_p_trues = [skip_p_true]
         
-        # Optional sparse correction: use ground-truth correctness to anchor confidence bins
-        if (args.correction_every > 0
-                and not args.baseline_only
-                and ((i + 1) % args.correction_every == 0)):
-            target_bin = args.correction_bin_high if is_correct else args.correction_bin_low
-            corr_opt = torch.optim.AdamW(train_model.parameters(), lr=args.correction_lr)
-            # Rebuild prompt/inputs for this question
-            prompt = create_qa_prompt(question)
-            messages = [{"role": "user", "content": prompt}]
-            input_text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-            inputs = tokenizer(input_text, return_tensors="pt", truncation=True, max_length=1024).to(train_model.device)
-            
-            for _ in range(max(1, args.correction_steps)):
-                with torch.no_grad():
-                    outputs = train_model.generate(
-                        **inputs,
-                        max_new_tokens=200,
-                        do_sample=False,
-                        pad_token_id=tokenizer.eos_token_id
-                    )
-                response_tokens = outputs[:, inputs['input_ids'].shape[1]:]
-                conf_mask = create_confidence_mask(response_tokens, tokenizer)
-                if conf_mask.sum() == 0:
-                    del outputs
-                    break
-                
-                labels = outputs.clone()
-                labels[:, :inputs['input_ids'].shape[1]] = -100
-                response_labels = labels[:, inputs['input_ids'].shape[1]:]
-                target_token_id = bin_digit_tokens[target_bin]
-                for j in range(response_tokens.shape[1]):
-                    if conf_mask[0, j] == 1:
-                        response_labels[0, j] = target_token_id
-                    else:
-                        response_labels[0, j] = -100
-                labels[:, inputs['input_ids'].shape[1]:] = response_labels
-                
-                corr_opt.zero_grad()
-                model_output = train_model(
-                    input_ids=outputs,
-                    attention_mask=torch.ones_like(outputs),
-                    labels=labels
-                )
-                if model_output.loss is not None and not torch.isnan(model_output.loss):
-                    model_output.loss.backward()
-                    torch.nn.utils.clip_grad_norm_(train_model.parameters(), max_norm=1.0)
-                    corr_opt.step()
-                del outputs
-        
         results.append(result)
         
-        # Update stats
         global_correct += int(is_correct)
         global_brier_sum += brier
         domain_stats[domain]['correct'] += int(is_correct)
@@ -1471,7 +1544,6 @@ def run_continual_experiment():
         global_acc = global_correct / n
         global_brier = global_brier_sum / n
         
-        # Rolling ECE
         if n >= 5:
             global_ece = compute_calibration_metrics(results, prefix="ttt")['ece']
         else:
@@ -1484,14 +1556,12 @@ def run_continual_experiment():
         learning_curve['avg_loss'].append(avg_loss)
         learning_curve['avg_p_true'].append(avg_p_true)
         
-        # Checkpoint every 50 questions
         if (i + 1) % 50 == 0:
             ckpt_suffix = args.run_name if args.run_name else args.mode
             with open(f'results/continual_ttt_{ckpt_suffix}_checkpoint.json', 'w') as f:
                 json.dump(results, f, default=str)
             print(f"  [Checkpoint saved: {i+1} questions]")
         
-        # Sample generation every 25 questions
         if (i + 1) % 25 == 0:
             print("\n" + "="*70)
             print(f"SAMPLE GENERATION @ Step {i+1} [{domain}]")
@@ -1506,7 +1576,6 @@ def run_continual_experiment():
                 print(f"Avg P(True): {avg_p_true:.3f}")
             print("="*70 + "\n")
             
-            # Log sample to W&B (with baseline and TTT answers)
             if use_wandb:
                 sample_table = wandb.Table(columns=[
                     "step", "domain", "question", "ground_truth",
@@ -1528,34 +1597,27 @@ def run_continual_experiment():
                 )
                 wandb.log({"samples": sample_table}, step=n, commit=False)
         
-        # W&B logging
         if use_wandb:
-            # Per-question metrics (not rolling)
             log_dict = {
                 "step": n,
-                "ttt/brier": brier,  # Per-question Brier (verbalized confidence)
+                "ttt/brier": brier,
                 "ttt/correct": int(is_correct),
                 "ttt/confidence": result['ttt_confidence'],
-                "ttt/p_true": result.get('ttt_p_true', avg_p_true),  # P(True) for final answer
-                # Rolling metrics
+                "ttt/p_true": result.get('ttt_p_true', avg_p_true),
                 "ttt/rolling_acc": global_acc,
                 "ttt/rolling_brier": global_brier,
                 "ttt/rolling_ece": global_ece,
-                # Training
                 "training/avg_loss": avg_loss,
                 "discriminative/avg_p_true": avg_p_true,
-                # Per-domain (within domain so far)
                 f"domain/{domain}/acc": domain_stats[domain]['correct'] / domain_stats[domain]['total'],
                 f"domain/{domain}/brier": domain_stats[domain]['brier_sum'] / domain_stats[domain]['total'],
                 f"domain/{domain}/correct": int(is_correct),
             }
-            # Log P(True)-based Brier if available
             if 'brier_p_true' in result:
                 log_dict["ttt/brier_p_true"] = result['brier_p_true']
             if neighbor_p_trues:
                 log_dict["discriminative/min_p_true"] = min(neighbor_p_trues)
                 log_dict["discriminative/max_p_true"] = max(neighbor_p_trues)
-            # Log PH gate metrics
             if args.use_ph_gate and ph_gate is not None:
                 log_dict["gate/ttt_active"] = int(should_do_ttt)
                 log_dict["gate/ttt_remaining"] = ph_gate.ttt_remaining
@@ -1564,10 +1626,9 @@ def run_continual_experiment():
                 log_dict["gate/ttt_skipped"] = int(result.get('ttt_skipped', False))
             wandb.log(log_dict, step=n)
         
-        # Detect domain boundary and print per-domain summary
+        # FIXED: Skip domain summaries in interleaved mode to avoid spam
         next_domain = questions[i + 1]['domain'] if i + 1 < len(questions) else None
-        if next_domain != domain:
-            # Finished a domain - print detailed per-domain metrics
+        if next_domain != domain and args.mode != 'interleaved':
             domain_results_so_far = [r for r in results if r.get('domain') == domain]
             if domain_results_so_far:
                 domain_cal = compute_calibration_metrics(domain_results_so_far, prefix="ttt")
@@ -1585,7 +1646,6 @@ def run_continual_experiment():
                 print(f"  AUROC:    {d_auroc:.4f}" if d_auroc else "  AUROC:    N/A")
                 print("=" * 70 + "\n")
                 
-                # Log domain completion to W&B
                 if use_wandb:
                     wandb.log({
                         f"domain_final/{domain}/acc": d_acc,
@@ -1594,7 +1654,6 @@ def run_continual_experiment():
                         f"domain_final/{domain}/auroc": d_auroc,
                     }, step=n, commit=False)
         
-        # Intermediate summary every 10 questions
         if (i + 1) % 10 == 0:
             print(f"\n[{i+1}/{len(questions)}] Global: Acc={global_acc:.1%}  Brier={global_brier:.4f}  ECE={global_ece:.4f}")
             for d in set([qa['domain'] for qa in questions[:i+1]]):
@@ -1604,10 +1663,10 @@ def run_continual_experiment():
                     print(f"  {DOMAIN_CONFIG[d]['name']}: Acc={d_acc:.1%}  Brier={d_brier:.4f}")
             if not args.baseline_only:
                 print(f"  Avg P(True): {avg_p_true:.3f}")
+    
     # Final metrics
     ttt_metrics = compute_calibration_metrics(results, prefix="ttt")
     
-    # Compute per-domain metrics (AUROC, Brier, ECE)
     domain_metrics = {}
     unique_domains = list(set([r['domain'] for r in results]))
     for domain in unique_domains:
@@ -1647,7 +1706,6 @@ def run_continual_experiment():
     
     print(f"\nConfidence distribution: {ttt_metrics['conf_distribution']}")
     
-    # PH Gate summary
     if args.use_ph_gate and ph_gate is not None:
         ttt_trained = sum(1 for r in results if not r.get('ttt_skipped', False))
         ttt_skipped = sum(1 for r in results if r.get('ttt_skipped', False))
@@ -1656,7 +1714,6 @@ def run_continual_experiment():
         print(f"  TTT rounds: {ttt_trained} ({100*ttt_trained/len(results):.1f}%)")
         print(f"  Skipped: {ttt_skipped} ({100*ttt_skipped/len(results):.1f}%)")
     
-    # P(True) distribution
     all_p_trues = [p for r in results for p in r.get('neighbor_p_trues', [])]
     if all_p_trues:
         print(f"\nP(True) Distribution:")
@@ -1665,7 +1722,6 @@ def run_continual_experiment():
         print(f"  Std: {np.std(all_p_trues):.3f}")
         print(f"  Range: [{min(all_p_trues):.3f}, {max(all_p_trues):.3f}]")
     
-    # Final W&B logging
     if use_wandb:
         log_dict = {
             "final/acc": global_acc,
@@ -1684,7 +1740,6 @@ def run_continual_experiment():
                 if m['auroc']:
                     log_dict[f"final/{domain}_auroc"] = m['auroc']
         
-        # Log gate final stats
         if args.use_ph_gate and ph_gate is not None:
             ttt_trained = sum(1 for r in results if not r.get('ttt_skipped', False))
             log_dict["final/gate_triggers"] = ph_gate.total_triggers
@@ -1696,7 +1751,6 @@ def run_continual_experiment():
         except Exception:
             pass
     
-    # Save results
     name_suffix = args.run_name if args.run_name else args.mode
     output_file = f"results/continual_ttt_{name_suffix}_results.json"
     save_data = {

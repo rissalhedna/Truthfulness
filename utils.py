@@ -261,12 +261,14 @@ def load_qa_dataset(dataset_mode="triviaqa", num_samples=100, model=None, tokeni
             # Map choices to letters
             letters = ["A", "B", "C", "D", "E", "F", "G", "H"]  # more than enough
             option_text = []
+            mc_options = {}
             correct_letter = None
             for idx, choice in enumerate(choices):
                 if idx >= len(letters):
                     break
                 letter = letters[idx]
                 option_text.append(f"{letter}. {choice}")
+                mc_options[letter] = choice
                 if labels[idx] == 1 and correct_letter is None:
                     correct_letter = letter
             
@@ -281,6 +283,7 @@ def load_qa_dataset(dataset_mode="triviaqa", num_samples=100, model=None, tokeni
                 'question': mc_question,
                 'ground_truth_answer': correct_letter,
                 'answer_aliases': [correct_letter],
+                'mc_options': mc_options,
                 'query_time': query_time_str,
                 'passage': f"TruthfulQA-MC: {question}"
             })
@@ -345,7 +348,8 @@ def load_qa_dataset(dataset_mode="triviaqa", num_samples=100, model=None, tokeni
                     break
                 try:
                     example = next(data_iter)
-                    choices_text = "\n".join([f"{chr(65+i)}. {c}" for i, c in enumerate(example['choices'])])
+                    mc_options = {chr(65+i): c for i, c in enumerate(example['choices'])}
+                    choices_text = "\n".join([f"{ltr}. {mc_options[ltr]}" for ltr in sorted(mc_options)])
                     full_question = f"{example['question']}\n\n{choices_text}"
                     query_time_str = datetime.now().strftime("%m/%d/%Y, %H:%M:%S PT")
                     
@@ -353,6 +357,7 @@ def load_qa_dataset(dataset_mode="triviaqa", num_samples=100, model=None, tokeni
                         'question': full_question,
                         'ground_truth_answer': answer_map[example['answer']],
                         'answer_aliases': [answer_map[example['answer']]],
+                        'mc_options': mc_options,
                         'query_time': query_time_str,
                         'passage': f"MMLU ({subject}): {example['question'][:100]}"
                     })
@@ -378,7 +383,8 @@ def load_qa_dataset(dataset_mode="triviaqa", num_samples=100, model=None, tokeni
             
             # Format question with choices
             choices = example['choices']
-            choices_text = "\n".join([f"{label}. {text}" for label, text in zip(choices['label'], choices['text'])])
+            mc_options = {label: text for label, text in zip(choices['label'], choices['text'])}
+            choices_text = "\n".join([f"{ltr}. {mc_options[ltr]}" for ltr in sorted(mc_options)])
             full_question = f"{example['question']}\n\n{choices_text}"
             
             query_time_str = datetime.now().strftime("%m/%d/%Y, %H:%M:%S PT")
@@ -387,6 +393,7 @@ def load_qa_dataset(dataset_mode="triviaqa", num_samples=100, model=None, tokeni
                 'question': full_question,
                 'ground_truth_answer': example['answerKey'],
                 'answer_aliases': [example['answerKey']],
+                'mc_options': mc_options,
                 'query_time': query_time_str,
                 'passage': f"ARC: {example['question'][:100]}"
             })
