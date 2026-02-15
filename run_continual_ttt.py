@@ -31,7 +31,7 @@ parser.add_argument('--mode', type=str, default='sequential',
 parser.add_argument('--domains', type=str, nargs='+', default=None,
                     help='Custom domain order (use with --mode custom)')
 parser.add_argument('--questions_per_domain', type=int, default=500, help='Questions per domain')
-parser.add_argument('--n_neighbors', type=int, default=3, help='Number of neighborhood questions')
+parser.add_argument('--n_neighbors', type=int, default=0, help='Number of neighborhood questions (0 = train on input question only)')
 parser.add_argument('--n_epochs', type=int, default=3, help='Training epochs per question')
 parser.add_argument('--k_distractors', type=int, default=4, help='Number of distractors for P(True) normalization')
 parser.add_argument('--use_raw_ptrue', action='store_true', help='Use raw P(True) without normalization for target bin')
@@ -71,6 +71,12 @@ parser.add_argument('--ph_threshold', type=float, default=4.0, help='PH trigger 
 parser.add_argument('--ema_alpha', type=float, default=0.05, help='EMA smoothing factor (lower=smoother)')
 parser.add_argument('--ttt_burst', type=int, default=20, help='Number of TTT rounds per trigger')
 parser.add_argument('--ttt_warmup', type=int, default=50, help='Force TTT for first N questions (warmup)')
+parser.add_argument('--use_bin_gate', action='store_true', help='Train only when |verbalized_bin - P(True)_bin| > threshold')
+parser.add_argument('--bin_gate_threshold', type=int, default=2, help='Bin gap threshold (default 2)')
+parser.add_argument('--use_base_target', action='store_true', help='Compute P(True) target using base model (no adapter) instead of adapted model')
+parser.add_argument('--overconfident_only', action='store_true', help='With bin_gate: only train when model is overconfident (verbalized > P(True))')
+parser.add_argument('--report_ptrue', action='store_true', help='After TTT, report P(True) norm as confidence instead of verbalized confidence')
+parser.add_argument('--use_mse_loss', action='store_true', help='Use MSE loss on expected confidence from logits instead of CE on bin digit')
 # Layer targeting arguments
 parser.add_argument('--layer_start', type=int, default=24, help='First layer to apply LoRA (default: 24 for late layers)')
 parser.add_argument('--layer_end', type=int, default=32, help='Last layer (exclusive) to apply LoRA (default: 32)')
@@ -94,6 +100,7 @@ import re
 import random
 from datetime import datetime
 from collections import defaultdict, deque
+from contextlib import nullcontext
 from functools import partial
 from tqdm.auto import tqdm
 from transformers import AutoTokenizer, AutoModelForCausalLM
@@ -403,8 +410,7 @@ def _is_mc_answer(answer: str) -> str:
     answer_clean = answer.strip().upper().rstrip('.')
     if len(answer_clean) == 1 and answer_clean.isalpha():
         return answer_clean
-    # Handle "C. full option text" — letter + separator + text
-    m = re.match(r'^([A-Z])[\.\)\:]\s', answer.strip())
+    m = re.match(r'^([A-Za-z])[\.\)\:]\s', answer.strip())
     if m:
         return m.group(1).upper()
     return None
@@ -579,9 +585,14 @@ def normalize_p_true_sharpened(p_scores, temperature=1.0):
 
 
 def create_confidence_mask(token_ids, tokenizer):
-    """Create mask that ONLY targets the confidence bin digit."""
+    """Create mask that ONLY targets the confidence bin digit.
+    
+    Uses token-ID matching instead of character-position alignment to avoid
+    fragile char-to-token mapping issues with SentencePiece/BPE tokenizers.
+    """
     mask = torch.zeros_like(token_ids, dtype=torch.float)
     
+    # Verify the response contains a "Confidence: binN" pattern
     response_text = tokenizer.decode(token_ids[0], skip_special_tokens=True)
     
     conf_match = response_text.lower().find("confidence:")
@@ -593,14 +604,18 @@ def create_confidence_mask(token_ids, tokenizer):
     if not bin_match:
         return mask
     
-    digit_char_pos = conf_match + bin_match.end() - 1
-    current_char = 0
-    for i, tid in enumerate(token_ids[0]):
-        token_text = tokenizer.decode([tid.item()], skip_special_tokens=True)
-        if current_char <= digit_char_pos < current_char + len(token_text):
+    target_digit = int(bin_match.group(1))
+    bin_digit_tokens = get_bin_digit_tokens(tokenizer)
+    if target_digit not in bin_digit_tokens:
+        return mask
+    target_token_id = bin_digit_tokens[target_digit]
+    
+    # Search backward from end — "Confidence: binN." is always the last line
+    seq_len = len(token_ids[0])
+    for i in range(seq_len - 1, max(seq_len - 30, -1), -1):
+        if token_ids[0][i].item() == target_token_id:
             mask[0, i] = 1.0
             break
-        current_char += len(token_text)
     
     return mask
 
@@ -791,6 +806,10 @@ def train_single_question_discriminative(question, train_model, optimizer, token
         questions_to_train.append({'question': question, 'difficulty': 'input'})
     
     # === Pass 1: Collect raw signals for all training questions ===
+    # When use_base_target: compute generation + P(True) with base model (no adapter)
+    # so the target bin matches the baseline's calibration signal
+    if args.use_base_target:
+        train_model.disable_adapter_layers()
     neighbor_data = []
     for n in questions_to_train:
         q = n['question'] if isinstance(n, dict) else n
@@ -880,6 +899,10 @@ def train_single_question_discriminative(question, train_model, optimizer, token
             'no_distractors': no_distractors,
         })
     
+    # Re-enable adapter after Pass 1 so training uses the adapted model
+    if args.use_base_target:
+        train_model.enable_adapter_layers()
+    
     # === Pass 2: Compute derived values with global p_know_mean ===
     p_know_mean = float(np.mean(pknow_values)) if pknow_values else 0.5
     
@@ -952,27 +975,46 @@ def train_single_question_discriminative(question, train_model, optimizer, token
             if outputs is None:
                 continue
             
-            labels = outputs.clone()
-            labels[:, :inputs['input_ids'].shape[1]] = -100
-            
-            response_labels = labels[:, inputs['input_ids'].shape[1]:]
-            target_token_id = bin_digit_tokens[nd['target_bin']]
-            
-            for i in range(response_tokens.shape[1]):
-                if conf_mask[0, i] == 1:
-                    response_labels[0, i] = target_token_id
-                else:
-                    response_labels[0, i] = -100
-            
-            labels[:, inputs['input_ids'].shape[1]:] = response_labels
-            
-            model_output = train_model(
-                input_ids=outputs,
-                attention_mask=torch.ones_like(outputs),
-                labels=labels
-            )
-            
-            loss = model_output.loss
+            if args.use_mse_loss:
+                # MSE loss: expected confidence from logits vs P(True) norm
+                conf_pos = (conf_mask[0] == 1).nonzero(as_tuple=True)[0]
+                if len(conf_pos) == 0:
+                    del outputs
+                    continue
+                full_input = outputs
+                model_output = train_model(input_ids=full_input, attention_mask=torch.ones_like(full_input))
+                # Logits at the token BEFORE the confidence digit (predicts the digit)
+                logit_pos = inputs['input_ids'].shape[1] + conf_pos[0] - 1
+                logits_at_conf = model_output.logits[0, logit_pos]
+                digit_token_ids = [bin_digit_tokens[i] for i in range(NUM_BINS)]
+                digit_logits = logits_at_conf[digit_token_ids]
+                digit_probs = F.softmax(digit_logits, dim=0)
+                bin_values = torch.arange(NUM_BINS, dtype=torch.float32, device=digit_probs.device)
+                expected_conf = (digit_probs * (bin_values + 0.5) / NUM_BINS).sum()
+                target_ptrue = torch.tensor(nd['p_true_norm'], dtype=torch.float32, device=expected_conf.device)
+                loss = (expected_conf - target_ptrue) ** 2
+            else:
+                labels = outputs.clone()
+                labels[:, :inputs['input_ids'].shape[1]] = -100
+                
+                response_labels = labels[:, inputs['input_ids'].shape[1]:]
+                target_token_id = bin_digit_tokens[nd['target_bin']]
+                
+                for i in range(response_tokens.shape[1]):
+                    if conf_mask[0, i] == 1:
+                        response_labels[0, i] = target_token_id
+                    else:
+                        response_labels[0, i] = -100
+                
+                labels[:, inputs['input_ids'].shape[1]:] = response_labels
+                
+                model_output = train_model(
+                    input_ids=outputs,
+                    attention_mask=torch.ones_like(outputs),
+                    labels=labels
+                )
+                
+                loss = model_output.loss
             if loss is not None and not torch.isnan(loss):
                 loss.backward()
                 valid_samples += 1
@@ -1011,16 +1053,33 @@ def train_single_question_discriminative(question, train_model, optimizer, token
         final_p_true = get_discriminative_confidence(question, answer, response, train_model, tokenizer, 
                                                      use_p_know=args.use_p_know, claimed_bin=claimed_conf)
     
+    # When report_ptrue: compute P(True) norm and use its bin as confidence
+    final_conf = claimed_conf
+    final_p_true_norm = final_p_true
+    if args.report_ptrue:
+        use_mc = mc_options if mc_options else None
+        ans_letter = _is_mc_answer(answer) if use_mc else None
+        if use_mc and ans_letter and ans_letter in use_mc:
+            cands = [f"{ans_letter}. {use_mc[ans_letter]}"] + [f"{l}. {use_mc[l]}" for l in sorted(use_mc.keys()) if l != ans_letter]
+        else:
+            cands = [answer] + generate_distractors(question, answer, train_model, tokenizer, k=args.k_distractors, mc_options=mc_options)
+        if len(cands) > 1:
+            with torch.no_grad():
+                ps = [get_discriminative_confidence(question, c, response, train_model, tokenizer, use_p_know=False, claimed_bin=None, candidate_list=cands) for c in cands]
+            final_p_true_norm = normalize_p_true_sharpened(ps, temperature=args.norm_temperature)
+        final_conf = p_true_to_bin(final_p_true_norm)
+    
     neighbor_p_know_mean = float(np.mean([n.get('p_know', 0.5) for n in neighbor_data])) if neighbor_data else 0.5
     neighbor_p_fused_mean = float(np.mean([n.get('p_fused', n.get('p_true_norm', 0.5)) for n in neighbor_data])) if neighbor_data else 0.5
     
     return {
         'answer': answer,
-        'confidence': claimed_conf,
+        'confidence': final_conf,
         'response': response,
         'neighbors': neighbor_data,
         'training_losses': training_losses,
         'p_true': final_p_true,
+        'p_true_norm': final_p_true_norm,
         'neighbor_p_know_mean': neighbor_p_know_mean,
         'neighbor_p_fused_mean': neighbor_p_fused_mean
     }
@@ -1360,6 +1419,34 @@ def run_continual_experiment():
             baseline = get_baseline_answer(question, train_model, tokenizer)
         baseline_correct = answers_match(baseline['answer'], qa, dataset_type=dataset_type)
         
+        if args.use_bin_gate and not args.baseline_only and should_do_ttt:
+            # Generate with adapted model to get verbalized bin
+            _gp = create_qa_prompt(question)
+            _gi = tokenizer(tokenizer.apply_chat_template([{"role": "user", "content": _gp}], tokenize=False, add_generation_prompt=True), return_tensors="pt", truncation=True, max_length=1024).to(train_model.device)
+            with torch.no_grad():
+                _go = train_model.generate(**_gi, max_new_tokens=200, do_sample=False, pad_token_id=tokenizer.eos_token_id)
+            _gr = tokenizer.decode(_go[0][_gi['input_ids'].shape[1]:], skip_special_tokens=True)
+            _ga, _gv = extract_answer(_gr), extract_confidence(_gr)
+            del _go
+            # Compute P(True) — base model if use_base_target, else adapted
+            mc_opts = qa.get('mc_options')
+            ans_letter = _is_mc_answer(_ga) if mc_opts else None
+            if mc_opts and ans_letter and ans_letter in mc_opts:
+                candidates = [f"{ans_letter}. {mc_opts[ans_letter]}"] + [f"{l}. {mc_opts[l]}" for l in sorted(mc_opts.keys()) if l != ans_letter]
+            else:
+                candidates = [_ga] + generate_distractors(question, _ga, train_model, tokenizer, k=args.k_distractors, mc_options=mc_opts)
+            _ctx = train_model.disable_adapter() if args.use_base_target else nullcontext()
+            with _ctx, torch.no_grad():
+                p_scores = [get_discriminative_confidence(question, c, _gr, train_model, tokenizer, use_p_know=False, claimed_bin=None, candidate_list=candidates) for c in candidates]
+            _pn = p_scores[0] if len(candidates) <= 1 else normalize_p_true_sharpened(p_scores, temperature=args.norm_temperature)
+            _gap = _gv - p_true_to_bin(_pn)
+            if args.overconfident_only:
+                if _gap <= args.bin_gate_threshold:
+                    should_do_ttt = False
+            else:
+                if abs(_gap) <= args.bin_gate_threshold:
+                    should_do_ttt = False
+        
         if args.baseline_only:
             is_correct = baseline_correct
 
@@ -1481,52 +1568,19 @@ def run_continual_experiment():
             }
         
         else:
-            prompt = create_qa_prompt(question)
-            messages = [{"role": "user", "content": prompt}]
-            input_text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-            inputs = tokenizer(input_text, return_tensors="pt", truncation=True, max_length=1024).to(train_model.device)
-            
-            with torch.no_grad():
-                outputs = train_model.generate(
-                    **inputs,
-                    max_new_tokens=200,
-                    do_sample=False,
-                    pad_token_id=tokenizer.eos_token_id
-                )
-            
-            response = tokenizer.decode(outputs[0][inputs['input_ids'].shape[1]:], skip_special_tokens=True)
-            del outputs
-            
-            answer = extract_answer(response)
-            confidence = extract_confidence(response)
+            # Skipped (PH or bin gate): report baseline verbalized, no training
+            answer, confidence = baseline['answer'], baseline['confidence']
             is_correct = answers_match(answer, qa, dataset_type=dataset_type)
-            
             conf_prob = CONF_TO_PROB.get(confidence, 0.5)
             brier = (conf_prob - float(is_correct)) ** 2
-            
             with torch.no_grad():
-                skip_p_true = get_discriminative_confidence(
-                    question, answer, response, train_model, tokenizer,
-                    use_p_know=False, claimed_bin=confidence
-                )
+                skip_p_true = get_discriminative_confidence(question, answer, baseline['response'], train_model, tokenizer, use_p_know=args.use_p_know, claimed_bin=confidence)
             brier_p_true = (skip_p_true - float(is_correct)) ** 2
-            
             result = {
-                'question': question[:200],
-                'ground_truth': ground_truth,
-                'domain': domain,
-                'baseline_answer': baseline['answer'],
-                'baseline_confidence': baseline['confidence'],
-                'baseline_correct': baseline_correct,
-                'ttt_answer': answer,
-                'ttt_confidence': confidence,
-                'ttt_correct': is_correct,
-                'ttt_p_true': skip_p_true,
-                'brier_p_true': brier_p_true,
-                'training_losses': [],
-                'neighbor_p_trues': [skip_p_true],
-                'avg_p_true': skip_p_true,
-                'ttt_skipped': True
+                'question': question[:200], 'ground_truth': ground_truth, 'domain': domain,
+                'baseline_answer': baseline['answer'], 'baseline_confidence': baseline['confidence'], 'baseline_correct': baseline_correct,
+                'ttt_answer': answer, 'ttt_confidence': confidence, 'ttt_correct': is_correct, 'ttt_p_true': skip_p_true,
+                'brier_p_true': brier_p_true, 'training_losses': [], 'neighbor_p_trues': [skip_p_true], 'avg_p_true': skip_p_true, 'ttt_skipped': True
             }
             avg_loss = 0.0
             avg_p_true = skip_p_true

@@ -329,7 +329,14 @@ def load_qa_dataset(dataset_mode="triviaqa", num_samples=100, model=None, tokeni
         for subject in subjects:
             for attempt in range(5):  # Retry up to 5 times
                 try:
-                    subject_iters[subject] = iter(load_dataset("cais/mmlu", subject, split="test"))
+                    try:
+                        subject_iters[subject] = iter(load_dataset("cais/mmlu", subject, split="test", revision="main"))
+                    except Exception as rev_e:
+                        if "404" in str(rev_e) or "Entry Not Found" in str(rev_e):
+                            # Stale cache or removed revision; try default branch
+                            subject_iters[subject] = iter(load_dataset("cais/mmlu", subject, split="test"))
+                        else:
+                            raise
                     break
                 except Exception as e:
                     if "429" in str(e) and attempt < 4:
@@ -502,24 +509,30 @@ def extract_answer(text):
     # Final fallback: return full text (don't truncate for debugging)
     return text.strip()  # ✅ FIXED: Was [:100], now returns full text
 
+confidence_extraction_stats = {'success': 0, 'fallback_no_match': 0, 'fallback_no_parse': 0}
+
 def extract_confidence(text, num_bins=DEFAULT_NUM_BINS):
     """Extract verbalized confidence level from model response."""
     conf_match = re.search(r'Confidence:\s*(.+?)(?=\n|$)', text, re.IGNORECASE)
     if conf_match:
         conf_text = conf_match.group(1).strip().lower()
     else:
+        confidence_extraction_stats['fallback_no_match'] += 1
         return num_bins // 2
 
     for i in range(num_bins):
         if f"bin{i}" in conf_text:
+            confidence_extraction_stats['success'] += 1
             return i
     
     digit_match = re.search(r'^(\d+)', conf_text)
     if digit_match:
         digit = int(digit_match.group(1))
         if 0 <= digit < num_bins:
+            confidence_extraction_stats['success'] += 1
             return digit
 
+    confidence_extraction_stats['fallback_no_parse'] += 1
     return num_bins // 2
 
 def normalize_answer(text):
@@ -712,7 +725,13 @@ def answers_match(model_answer, ground_truth, threshold=0.7, dataset_type='auto'
                 if match:
                     return match.group(1).upper() == gt_letter
             
-            # No valid letter pattern found
+            # Fallback: reverse-map option text to letter via mc_options
+            if isinstance(ground_truth, dict) and 'mc_options' in ground_truth:
+                norm_model = normalize_answer(model_answer)
+                for letter, option_text in ground_truth['mc_options'].items():
+                    if normalize_answer(option_text) == norm_model:
+                        return letter.upper() == gt_letter
+            
             return False
         
         # ARC: Multiple choice letter matching
@@ -737,7 +756,13 @@ def answers_match(model_answer, ground_truth, threshold=0.7, dataset_type='auto'
                 if match:
                     return match.group(1).upper() == gt_letter
             
-            # No valid letter pattern found
+            # Fallback: reverse-map option text to letter via mc_options
+            if isinstance(ground_truth, dict) and 'mc_options' in ground_truth:
+                norm_model = normalize_answer(model_answer)
+                for letter, option_text in ground_truth['mc_options'].items():
+                    if normalize_answer(option_text) == norm_model:
+                        return letter.upper() == gt_letter
+            
             return False
         
         # Auto: Try numerical first, fallback to text
@@ -991,128 +1016,7 @@ def evaluate_calibration(qa_dataset, sample_results, model, tokenizer, max_eval=
 
     return results
 
-def calculate_calibration_metrics(results):
-    """
-    Calculate calibration metrics: ECE, accuracy, etc.
-    
-    Calibration Definition:
-    A model is well-calibrated if its stated confidence level matches the 
-    percentage correctness rate of its sampled answers on a given question.
-    
-    For example:
-    - If model states bin3 (60-80% confident), the correctness_rate should be ~0.7
-    - If model states bin4 (80-100% confident), the correctness_rate should be ~0.9
-    """
-    df = pd.DataFrame(results)
-
-    # Accuracy (of the temperature=0 answer)
-    accuracy = df['is_correct'].mean()
-
-    # Brier Score - measures calibration quality
-    # Lower is better. Range: [0, 1], where 0 = perfect calibration
-    # Brier = mean((stated_confidence - actual_correctness)^2)
-    bin_to_prob = {0: 0.1, 1: 0.3, 2: 0.5, 3: 0.7, 4: 0.9}
-    df['stated_confidence_prob'] = df['verbalized_confidence_bin'].map(bin_to_prob)
-    brier_score = ((df['stated_confidence_prob'] - df['correctness_rate']) ** 2).mean()
-    
-    # Expected Calibration Error (ECE) - bin-based
-    # For each confidence bin, compare:
-    #   - Stated confidence: verbalized_confidence_bin (what model claims)
-    #   - Actual performance: correctness_rate (% of samples that are correct)
-    ece = 0.0
-    for bin_idx in range(5):
-        bin_data = df[df['verbalized_confidence_bin'] == bin_idx]
-        if len(bin_data) > 0:
-            # Average correctness_rate for all questions in this confidence bin
-            avg_correctness_rate = bin_data['correctness_rate'].mean()
-            # Expected confidence for this bin (midpoint: bin0=0.1, bin1=0.3, ..., bin4=0.9)
-            bin_confidence = (bin_idx + 0.5) / 5.0
-            # Weighted calibration error
-            ece += (len(bin_data) / len(df)) * abs(avg_correctness_rate - bin_confidence)
-
-    # Calibration by bin (detailed breakdown)
-    calibration_by_bin = []
-    for bin_idx in range(5):
-        bin_data = df[df['verbalized_confidence_bin'] == bin_idx]
-        if len(bin_data) > 0:
-            calibration_by_bin.append({
-                'bin': bin_idx,
-                'count': len(bin_data),
-                'stated_confidence': (bin_idx + 0.5) / 5.0,
-                'avg_correctness_rate': bin_data['correctness_rate'].mean(),
-                'calibration_gap': abs(bin_data['correctness_rate'].mean() - (bin_idx + 0.5) / 5.0)
-            })
-
-    return {
-        'accuracy': accuracy,
-        'brier_score': brier_score,
-        'ece': ece,
-        'calibration_by_bin': calibration_by_bin,
-        'results_df': df
-    }
-
 print("✅ Calibration evaluation functions defined!")
-
-
-def calculate_calibration_metrics(results):
-    """
-    Calculate calibration metrics: ECE, accuracy, etc.
-    
-    Calibration Definition:
-    A model is well-calibrated if its stated confidence level matches the 
-    percentage correctness rate of its sampled answers on a given question.
-    
-    For example:
-    - If model states bin3 (60-80% confident), the correctness_rate should be ~0.7
-    - If model states bin4 (80-100% confident), the correctness_rate should be ~0.9
-    """
-    df = pd.DataFrame(results)
-
-    # Accuracy (of the temperature=0 answer)
-    accuracy = df['is_correct'].mean()
-
-    # Brier Score - measures calibration quality
-    # Lower is better. Range: [0, 1], where 0 = perfect calibration
-    # Brier = mean((stated_confidence - actual_correctness)^2)
-    bin_to_prob = {0: 0.1, 1: 0.3, 2: 0.5, 3: 0.7, 4: 0.9}
-    df['stated_confidence_prob'] = df['verbalized_confidence_bin'].map(bin_to_prob)
-    brier_score = ((df['stated_confidence_prob'] - df['correctness_rate']) ** 2).mean()
-    
-    # Expected Calibration Error (ECE) - bin-based
-    # For each confidence bin, compare:
-    #   - Stated confidence: verbalized_confidence_bin (what model claims)
-    #   - Actual performance: correctness_rate (% of samples that are correct)
-    ece = 0.0
-    for bin_idx in range(5):
-        bin_data = df[df['verbalized_confidence_bin'] == bin_idx]
-        if len(bin_data) > 0:
-            # Average correctness_rate for all questions in this confidence bin
-            avg_correctness_rate = bin_data['correctness_rate'].mean()
-            # Expected confidence for this bin (midpoint: bin0=0.1, bin1=0.3, ..., bin4=0.9)
-            bin_confidence = (bin_idx + 0.5) / 5.0
-            # Weighted calibration error
-            ece += (len(bin_data) / len(df)) * abs(avg_correctness_rate - bin_confidence)
-
-    # Calibration by bin (detailed breakdown)
-    calibration_by_bin = []
-    for bin_idx in range(5):
-        bin_data = df[df['verbalized_confidence_bin'] == bin_idx]
-        if len(bin_data) > 0:
-            calibration_by_bin.append({
-                'bin': bin_idx,
-                'count': len(bin_data),
-                'stated_confidence': (bin_idx + 0.5) / 5.0,
-                'avg_correctness_rate': bin_data['correctness_rate'].mean(),
-                'calibration_gap': abs(bin_data['correctness_rate'].mean() - (bin_idx + 0.5) / 5.0)
-            })
-
-    return {
-        'accuracy': accuracy,
-        'brier_score': brier_score,
-        'ece': ece,
-        'calibration_by_bin': calibration_by_bin,
-        'results_df': df
-    }
 
 def visualize_calibration(calib_results, title_prefix=""):
     """
