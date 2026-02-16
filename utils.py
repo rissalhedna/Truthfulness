@@ -111,8 +111,9 @@ def load_qa_dataset(dataset_mode="triviaqa", num_samples=100, model=None, tokeni
             })
 
         print(f"Loaded {len(qa_pairs)} Q&A pairs from TriviaQA")
-        print(f"Example: Q: {qa_pairs[0]['question']}")
-        print(f"         A: {qa_pairs[0]['ground_truth_answer']} (+ {len(qa_pairs[0]['answer_aliases'])-1} aliases)")
+        if qa_pairs:
+            print(f"Example: Q: {qa_pairs[0]['question']}")
+            print(f"         A: {qa_pairs[0]['ground_truth_answer']} (+ {len(qa_pairs[0]['answer_aliases'])-1} aliases)")
 
     elif dataset_mode == "wikitext":
         if model is None or tokenizer is None:
@@ -143,8 +144,9 @@ def load_qa_dataset(dataset_mode="triviaqa", num_samples=100, model=None, tokeni
         qa_pairs = generate_qa_pairs(passages, model, tokenizer, num_pairs=len(passages))
 
         print(f"Generated {len(qa_pairs)} Q&A pairs from WikiText")
-        print(f"Example: Q: {qa_pairs[0]['question']}")
-        print(f"         A: {qa_pairs[0]['ground_truth_answer']}")
+        if qa_pairs:
+            print(f"Example: Q: {qa_pairs[0]['question']}")
+            print(f"         A: {qa_pairs[0]['ground_truth_answer']}")
 
     elif dataset_mode == "gsm8k":
         print("Loading GSM8K dataset...")
@@ -177,8 +179,9 @@ def load_qa_dataset(dataset_mode="triviaqa", num_samples=100, model=None, tokeni
             })
 
         print(f"Loaded {len(qa_pairs)} Q&A pairs from GSM8K")
-        print(f"Example: Q: {qa_pairs[0]['question']}")
-        print(f"         A: {qa_pairs[0]['ground_truth_answer']}")
+        if qa_pairs:
+            print(f"Example: Q: {qa_pairs[0]['question']}")
+            print(f"         A: {qa_pairs[0]['ground_truth_answer']}")
 
     elif dataset_mode == "hle":
         print("Loading HLE dataset...")
@@ -408,7 +411,7 @@ def load_qa_dataset(dataset_mode="triviaqa", num_samples=100, model=None, tokeni
         print(f"Loaded {len(qa_pairs)} Q&A pairs from ARC-Challenge")
         if qa_pairs:
             print(f"Example: Q: {qa_pairs[0]['question'][:100]}...")
-        print(f"         A: {qa_pairs[0]['ground_truth_answer']}")
+            print(f"         A: {qa_pairs[0]['ground_truth_answer']}")
 
     else:
         raise ValueError(f"Unknown dataset_mode: {dataset_mode}. Use 'triviaqa', 'gsm8k', 'hle', 'truthfulqa', 'mmlu', or 'arc'")
@@ -866,8 +869,11 @@ def compute_correctness_rates(qa_dataset, model, tokenizer, n_samples=10,
         ground_truth = qa['ground_truth_answer']
         aliases = qa.get('answer_aliases', [ground_truth])
         
-        # Create prompt
-        prompt = create_qa_prompt(question)
+        # Create prompt (use math prompt for GSM8K)
+        if dataset_type == 'gsm8k':
+            prompt = create_math_qa_prompt(question)
+        else:
+            prompt = create_qa_prompt(question)
         messages = [{"role": "user", "content": prompt}]
         input_text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
         inputs = tokenizer(input_text, return_tensors="pt", truncation=True, max_length=1024).to(model.device)
@@ -977,7 +983,10 @@ def evaluate_calibration(qa_dataset, sample_results, model, tokenizer, max_eval=
                                                    desc="Evaluating calibration", 
                                                    total=min(max_eval, len(sample_results)))):
         # Generate answer with verbalized confidence (temperature=0 for consistency)
-        prompt = create_qa_prompt(qa['question'])
+        if dataset_type == 'gsm8k':
+            prompt = create_math_qa_prompt(qa['question'])
+        else:
+            prompt = create_qa_prompt(qa['question'])
         messages = [{"role": "user", "content": prompt}]
         input_text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
         inputs = tokenizer(input_text, return_tensors="pt", truncation=True, max_length=1024).to(model.device)

@@ -77,6 +77,9 @@ parser.add_argument('--use_base_target', action='store_true', help='Compute P(Tr
 parser.add_argument('--overconfident_only', action='store_true', help='With bin_gate: only train when model is overconfident (verbalized > P(True))')
 parser.add_argument('--report_ptrue', action='store_true', help='After TTT, report P(True) norm as confidence instead of verbalized confidence')
 parser.add_argument('--use_mse_loss', action='store_true', help='Use MSE loss on expected confidence from logits instead of CE on bin digit')
+parser.add_argument('--use_ranking_loss', action='store_true', help='Use pairwise ranking loss against buffer of past questions')
+parser.add_argument('--ranking_buffer_size', type=int, default=16, help='Number of past questions in ranking buffer')
+parser.add_argument('--use_soft_confidence', action='store_true', help='Report soft expected confidence from digit logits instead of hard argmax')
 # Layer targeting arguments
 parser.add_argument('--layer_start', type=int, default=24, help='First layer to apply LoRA (default: 24 for late layers)')
 parser.add_argument('--layer_end', type=int, default=32, help='Last layer (exclusive) to apply LoRA (default: 32)')
@@ -575,6 +578,21 @@ def get_bin_digit_tokens(tokenizer):
     return {i: tokenizer.encode(str(i), add_special_tokens=False)[-1] for i in range(NUM_BINS)}
 
 
+def get_soft_confidence(generated_ids, input_len, model, tokenizer):
+    """Extract continuous expected confidence from digit logit distribution."""
+    bdt = get_bin_digit_tokens(tokenizer)
+    conf_mask = create_confidence_mask(generated_ids[:, input_len:], tokenizer)
+    conf_pos = (conf_mask[0] == 1).nonzero(as_tuple=True)[0]
+    if len(conf_pos) == 0:
+        return None
+    with torch.no_grad():
+        logits = model(input_ids=generated_ids, attention_mask=torch.ones_like(generated_ids)).logits
+    digit_logits = logits[0, input_len + conf_pos[0] - 1][[bdt[b] for b in range(NUM_BINS)]]
+    probs = F.softmax(digit_logits, dim=0)
+    bins = torch.arange(NUM_BINS, dtype=torch.float32, device=probs.device)
+    return ((probs * (bins + 0.5) / NUM_BINS).sum()).item()
+
+
 def normalize_p_true_sharpened(p_scores, temperature=1.0):
     """Normalize P(True) across candidates with optional sharpening."""
     scores = torch.tensor(p_scores, dtype=torch.float32)
@@ -780,7 +798,7 @@ def find_optimal_temperature(val_results, temperature_range=None):
 # DISCRIMINATIVE TTT TRAINING
 # =============================================================================
 
-def train_single_question_discriminative(question, train_model, optimizer, tokenizer, n_neighbors=5, n_epochs=3, dataset_type="auto", neighbors_only=False, mc_options=None):
+def train_single_question_discriminative(question, train_model, optimizer, tokenizer, n_neighbors=5, n_epochs=3, dataset_type="auto", neighbors_only=False, mc_options=None, nb_model=None, nb_tokenizer=None, ranking_buffer=None):
     """Train on a single question using discriminative P(True) as pseudo-label.
     
     Args:
@@ -797,9 +815,9 @@ def train_single_question_discriminative(question, train_model, optimizer, token
     
     train_model.eval()
     if n_neighbors > 0:
-        # FIXED: Always use base model (without adapter) for consistent neighbor generation
-        with train_model.disable_adapter():
-            neighbors = generate_neighborhood_questions(question, train_model, tokenizer, n_neighbors)
+        _nb_model = nb_model if nb_model is not None else neighbor_model
+        _nb_tok = nb_tokenizer if nb_tokenizer is not None else neighbor_tokenizer
+        neighbors = generate_neighborhood_questions(question, _nb_model, _nb_tok, n_neighbors)
         questions_to_train.extend(neighbors)
     
     if len(questions_to_train) == 0:
@@ -810,98 +828,99 @@ def train_single_question_discriminative(question, train_model, optimizer, token
     # so the target bin matches the baseline's calibration signal
     if args.use_base_target:
         train_model.disable_adapter_layers()
-    neighbor_data = []
-    for n in questions_to_train:
-        q = n['question'] if isinstance(n, dict) else n
-        difficulty = n.get('difficulty', 'similar') if isinstance(n, dict) else 'similar'
-        
-        # When reusing MCQ options, append choices to neighbor questions
-        # so the model answers with a letter (consistent with original MCQ format)
-        if mc_options and args.reuse_mcq_options and difficulty != 'input':
-            choices = "\n".join(f"{ltr}. {mc_options[ltr]}" for ltr in sorted(mc_options))
-            q = f"{q}\n{choices}"
-        
-        prompt = create_qa_prompt(q)
-        messages = [{"role": "user", "content": prompt}]
-        input_text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-        inputs = tokenizer(input_text, return_tensors="pt", truncation=True, max_length=1024).to(train_model.device)
-        
-        with torch.no_grad():
-            outputs = train_model.generate(
-                **inputs,
-                max_new_tokens=200,
-                do_sample=False,
-                pad_token_id=tokenizer.eos_token_id
-            )
-        
-        response = tokenizer.decode(outputs[0][inputs['input_ids'].shape[1]:], skip_special_tokens=True)
-        answer = extract_answer(response)
-        claimed_conf = extract_confidence(response)
-        
-        p_know = get_discriminative_confidence(
-            q,
-            answer,
-            response,
-            train_model,
-            tokenizer,
-            use_p_know=True,
-            claimed_bin=claimed_conf
-        )
-        pknow_values.append(p_know)
-        del outputs
-        
-        # Use structured mc_options when the answer is a valid MCQ letter;
-        # otherwise fall back to distractor generation.
-        use_mc = mc_options if (mc_options and (args.reuse_mcq_options or difficulty == 'input')) else None
-        ans_letter = _is_mc_answer(answer) if use_mc else None
-        if use_mc and ans_letter and ans_letter in use_mc:
-            # Answer at index 0 (required by normalize_p_true_sharpened),
-            # then remaining options in sorted order — no duplicates.
-            candidates = [f"{ans_letter}. {use_mc[ans_letter]}"]
-            for ltr in sorted(use_mc.keys()):
-                if ltr != ans_letter:
-                    candidates.append(f"{ltr}. {use_mc[ltr]}")
-        else:
-            distractors = generate_distractors(q, answer, train_model, tokenizer, k=args.k_distractors, mc_options=mc_options)
-            candidates = [answer] + distractors
-        
-        no_distractors = len(candidates) <= 1
-        
-        p_scores = []
-        with torch.no_grad():
-            for cand in candidates:
-                p_cand = get_discriminative_confidence(
-                    q,
-                    cand,
-                    response,
-                    train_model,
-                    tokenizer,
-                    use_p_know=False,
-                    claimed_bin=None,
-                    candidate_list=candidates,
+    try:
+        neighbor_data = []
+        for n in questions_to_train:
+            q = n['question'] if isinstance(n, dict) else n
+            difficulty = n.get('difficulty', 'similar') if isinstance(n, dict) else 'similar'
+            
+            # When reusing MCQ options, append choices to neighbor questions
+            # so the model answers with a letter (consistent with original MCQ format)
+            if mc_options and args.reuse_mcq_options and difficulty != 'input':
+                choices = "\n".join(f"{ltr}. {mc_options[ltr]}" for ltr in sorted(mc_options))
+                q = f"{q}\n{choices}"
+            
+            prompt = create_qa_prompt(q)
+            messages = [{"role": "user", "content": prompt}]
+            input_text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+            inputs = tokenizer(input_text, return_tensors="pt", truncation=True, max_length=1024).to(train_model.device)
+            
+            with torch.no_grad():
+                outputs = train_model.generate(
+                    **inputs,
+                    max_new_tokens=200,
+                    do_sample=False,
+                    pad_token_id=tokenizer.eos_token_id
                 )
-                p_scores.append(p_cand)
-        p_true_raw = p_scores[0]
-        
-        if no_distractors:
-            p_true_norm = p_true_raw
-        else:
-            p_true_norm = normalize_p_true_sharpened(p_scores, temperature=args.norm_temperature)
-        
-        neighbor_data.append({
-            'question': q,
-            'difficulty': difficulty,
-            'answer': answer,
-            'response': response,
-            'p_true_raw': p_true_raw,
-            'p_true_norm': p_true_norm,
-            'p_know': p_know,
-            'no_distractors': no_distractors,
-        })
-    
-    # Re-enable adapter after Pass 1 so training uses the adapted model
-    if args.use_base_target:
-        train_model.enable_adapter_layers()
+            
+            response = tokenizer.decode(outputs[0][inputs['input_ids'].shape[1]:], skip_special_tokens=True)
+            answer = extract_answer(response)
+            claimed_conf = extract_confidence(response)
+            
+            p_know = get_discriminative_confidence(
+                q,
+                answer,
+                response,
+                train_model,
+                tokenizer,
+                use_p_know=True,
+                claimed_bin=claimed_conf
+            )
+            pknow_values.append(p_know)
+            del outputs
+            
+            # Use structured mc_options when the answer is a valid MCQ letter;
+            # otherwise fall back to distractor generation.
+            use_mc = mc_options if (mc_options and (args.reuse_mcq_options or difficulty == 'input')) else None
+            ans_letter = _is_mc_answer(answer) if use_mc else None
+            if use_mc and ans_letter and ans_letter in use_mc:
+                # Answer at index 0 (required by normalize_p_true_sharpened),
+                # then remaining options in sorted order — no duplicates.
+                candidates = [f"{ans_letter}. {use_mc[ans_letter]}"]
+                for ltr in sorted(use_mc.keys()):
+                    if ltr != ans_letter:
+                        candidates.append(f"{ltr}. {use_mc[ltr]}")
+            else:
+                distractors = generate_distractors(q, answer, train_model, tokenizer, k=args.k_distractors, mc_options=mc_options)
+                candidates = [answer] + distractors
+            
+            no_distractors = len(candidates) <= 1
+            
+            p_scores = []
+            with torch.no_grad():
+                for cand in candidates:
+                    p_cand = get_discriminative_confidence(
+                        q,
+                        cand,
+                        response,
+                        train_model,
+                        tokenizer,
+                        use_p_know=False,
+                        claimed_bin=None,
+                        candidate_list=candidates,
+                    )
+                    p_scores.append(p_cand)
+            p_true_raw = p_scores[0]
+            
+            if no_distractors:
+                p_true_norm = p_true_raw
+            else:
+                p_true_norm = normalize_p_true_sharpened(p_scores, temperature=args.norm_temperature)
+            
+            neighbor_data.append({
+                'question': q,
+                'difficulty': difficulty,
+                'answer': answer,
+                'response': response,
+                'p_true_raw': p_true_raw,
+                'p_true_norm': p_true_norm,
+                'p_know': p_know,
+                'no_distractors': no_distractors,
+            })
+    finally:
+        # Re-enable adapter after Pass 1 so training uses the adapted model
+        if args.use_base_target:
+            train_model.enable_adapter_layers()
     
     # === Pass 2: Compute derived values with global p_know_mean ===
     p_know_mean = float(np.mean(pknow_values)) if pknow_values else 0.5
@@ -975,7 +994,36 @@ def train_single_question_discriminative(question, train_model, optimizer, token
             if outputs is None:
                 continue
             
-            if args.use_mse_loss:
+            if args.use_ranking_loss:
+                # Pairwise ranking loss against buffer of past questions
+                conf_pos = (conf_mask[0] == 1).nonzero(as_tuple=True)[0]
+                if len(conf_pos) == 0:
+                    del outputs
+                    continue
+                model_output = train_model(input_ids=outputs, attention_mask=torch.ones_like(outputs))
+                logit_pos = inputs['input_ids'].shape[1] + conf_pos[0] - 1
+                digit_logits = model_output.logits[0, logit_pos][[bin_digit_tokens[b] for b in range(NUM_BINS)]]
+                digit_probs = F.softmax(digit_logits, dim=0)
+                bin_vals = torch.arange(NUM_BINS, dtype=torch.float32, device=digit_probs.device)
+                expected_conf = (digit_probs * (bin_vals + 0.5) / NUM_BINS).sum()
+                
+                if ranking_buffer:
+                    cur_ptrue = nd['p_true_norm']
+                    loss = torch.tensor(0.0, device=expected_conf.device)
+                    n_pairs = 0
+                    for buf_conf, buf_ptrue in ranking_buffer:
+                        if abs(cur_ptrue - buf_ptrue) < 0.05:
+                            continue
+                        diff = expected_conf - buf_conf
+                        if cur_ptrue > buf_ptrue:
+                            loss = loss - F.logsigmoid(diff)
+                        else:
+                            loss = loss - F.logsigmoid(-diff)
+                        n_pairs += 1
+                    loss = loss / n_pairs if n_pairs > 0 else None
+                else:
+                    loss = None
+            elif args.use_mse_loss:
                 # MSE loss: expected confidence from logits vs P(True) norm
                 conf_pos = (conf_mask[0] == 1).nonzero(as_tuple=True)[0]
                 if len(conf_pos) == 0:
@@ -983,7 +1031,6 @@ def train_single_question_discriminative(question, train_model, optimizer, token
                     continue
                 full_input = outputs
                 model_output = train_model(input_ids=full_input, attention_mask=torch.ones_like(full_input))
-                # Logits at the token BEFORE the confidence digit (predicts the digit)
                 logit_pos = inputs['input_ids'].shape[1] + conf_pos[0] - 1
                 logits_at_conf = model_output.logits[0, logit_pos]
                 digit_token_ids = [bin_digit_tokens[i] for i in range(NUM_BINS)]
@@ -1034,6 +1081,14 @@ def train_single_question_discriminative(question, train_model, optimizer, token
         
         training_losses.append(np.mean(epoch_losses) if epoch_losses else 0.0)
     
+    # Update ranking buffer with the input question's data
+    if ranking_buffer is not None:
+        input_nd = next((nd for nd in neighbor_data if nd.get('difficulty') == 'input'), None)
+        if input_nd:
+            ranking_buffer.append((CONF_TO_PROB.get(input_nd['target_bin'], 0.5), input_nd['p_true_norm']))
+            if len(ranking_buffer) > args.ranking_buffer_size:
+                ranking_buffer.pop(0)
+    
     train_model.eval()
     prompt = create_qa_prompt(question)
     messages = [{"role": "user", "content": prompt}]
@@ -1044,17 +1099,21 @@ def train_single_question_discriminative(question, train_model, optimizer, token
         outputs = train_model.generate(**inputs, **generation_kwargs)
     
     response = tokenizer.decode(outputs[0][inputs['input_ids'].shape[1]:], skip_special_tokens=True)
-    del outputs
     
     answer = extract_answer(response)
     claimed_conf = extract_confidence(response)
+    
+    # Soft confidence: read expected value from digit logit distribution
+    if args.use_soft_confidence:
+        soft = get_soft_confidence(outputs, inputs['input_ids'].shape[1], train_model, tokenizer)
+    del outputs
     
     with torch.no_grad():
         final_p_true = get_discriminative_confidence(question, answer, response, train_model, tokenizer, 
                                                      use_p_know=args.use_p_know, claimed_bin=claimed_conf)
     
     # When report_ptrue: compute P(True) norm and use its bin as confidence
-    final_conf = claimed_conf
+    final_conf = p_true_to_bin(soft) if (args.use_soft_confidence and soft is not None) else claimed_conf
     final_p_true_norm = final_p_true
     if args.report_ptrue:
         use_mc = mc_options if mc_options else None
@@ -1382,6 +1441,8 @@ def run_continual_experiment():
         'avg_p_true': []
     }
     
+    ranking_buffer = [] if args.use_ranking_loss else None
+    
     ph_gate = None
     if args.use_ph_gate:
         ph_gate = PHGate(
@@ -1530,7 +1591,8 @@ def run_continual_experiment():
             ttt_result = train_single_question_discriminative(
                 question, train_model, optimizer, tokenizer,
                 n_neighbors=args.n_neighbors, n_epochs=args.n_epochs, dataset_type=dataset_type,
-                neighbors_only=args.neighbors_only, mc_options=qa.get('mc_options')
+                neighbors_only=args.neighbors_only, mc_options=qa.get('mc_options'),
+                nb_model=neighbor_model, nb_tokenizer=neighbor_tokenizer
             )
             
             is_correct = answers_match(ttt_result['answer'], qa, dataset_type=dataset_type)
