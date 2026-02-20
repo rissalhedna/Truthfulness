@@ -71,18 +71,25 @@ parser.add_argument('--ph_threshold', type=float, default=4.0, help='PH trigger 
 parser.add_argument('--ema_alpha', type=float, default=0.05, help='EMA smoothing factor (lower=smoother)')
 parser.add_argument('--ttt_burst', type=int, default=20, help='Number of TTT rounds per trigger')
 parser.add_argument('--ttt_warmup', type=int, default=50, help='Force TTT for first N questions (warmup)')
+parser.add_argument('--ph_reset_on_trigger', action='store_true', help='Zero LoRA weights when PH fires a new trigger (not during burst)')
+parser.add_argument('--ph_cooldown', type=int, default=0, help='After burst ends, suppress PH triggers for N questions')
 parser.add_argument('--use_bin_gate', action='store_true', help='Train only when |verbalized_bin - P(True)_bin| > threshold')
 parser.add_argument('--bin_gate_threshold', type=int, default=2, help='Bin gap threshold (default 2)')
 parser.add_argument('--use_base_target', action='store_true', help='Compute P(True) target using base model (no adapter) instead of adapted model')
 parser.add_argument('--overconfident_only', action='store_true', help='With bin_gate: only train when model is overconfident (verbalized > P(True))')
 parser.add_argument('--report_ptrue', action='store_true', help='After TTT, report P(True) norm as confidence instead of verbalized confidence')
 parser.add_argument('--use_mse_loss', action='store_true', help='Use MSE loss on expected confidence from logits instead of CE on bin digit')
+parser.add_argument('--use_directional_target', action='store_true', help='With MSE loss, move confidence partially toward P(True) target instead of exact matching')
+parser.add_argument('--directional_alpha', type=float, default=0.3, help='Step size toward P(True) when using directional target (0-1)')
+parser.add_argument('--directional_clip', type=float, default=0.15, help='Max absolute directional correction per sample when using directional target')
 parser.add_argument('--use_ranking_loss', action='store_true', help='Use pairwise ranking loss against buffer of past questions')
 parser.add_argument('--ranking_buffer_size', type=int, default=16, help='Number of past questions in ranking buffer')
 parser.add_argument('--use_soft_confidence', action='store_true', help='Report soft expected confidence from digit logits instead of hard argmax')
 # Layer targeting arguments
 parser.add_argument('--layer_start', type=int, default=24, help='First layer to apply LoRA (default: 24 for late layers)')
 parser.add_argument('--layer_end', type=int, default=32, help='Last layer (exclusive) to apply LoRA (default: 32)')
+parser.add_argument('--lora_last_n_layers', type=int, default=0, help='If >0, auto-target last N layers (overrides layer_start/layer_end)')
+parser.add_argument('--lora_target_keys', type=str, default='q_proj,v_proj', help='Comma-separated attention module suffixes to target (e.g. q_proj,v_proj or qkv_proj)')
 args = parser.parse_args()
 
 # Handle accumulation flags
@@ -101,6 +108,7 @@ import numpy as np
 import json
 import re
 import random
+import time
 from datetime import datetime
 from collections import defaultdict, deque
 from contextlib import nullcontext
@@ -125,6 +133,22 @@ from utils import (
 torch.manual_seed(args.seed)
 np.random.seed(args.seed)
 random.seed(args.seed)
+
+def _dbg_log(location, message, data=None, run_id="pre-fix", hypothesis_id="H0"):
+    try:
+        payload = {
+            "id": f"log_{int(time.time()*1000)}_{random.randint(1000,9999)}",
+            "runId": run_id,
+            "hypothesisId": hypothesis_id,
+            "location": location,
+            "message": message,
+            "data": data or {},
+            "timestamp": int(time.time() * 1000),
+        }
+        with open("/ltstorage/home/3hedna/Truthfulness/.cursor/debug.log", "a", encoding="utf-8") as f:
+            f.write(json.dumps(payload, default=str) + "\n")
+    except Exception:
+        pass
 
 DEVICE = "cuda:0"
 
@@ -168,7 +192,7 @@ create_qa_prompt = partial(_create_qa_prompt, num_bins=NUM_BINS)
 extract_confidence = partial(_extract_confidence, num_bins=NUM_BINS)
 
 print("=" * 70)
-print(f"CONTINUAL TTT WITH DISCRIMINATIVE CALIBRATION - LAYERS {LAYER_START}-{LAYER_END-1}")
+print("CONTINUAL TTT WITH DISCRIMINATIVE CALIBRATION")
 print("=" * 70)
 print(f"PyTorch: {torch.__version__}")
 print(f"CUDA available: {torch.cuda.is_available()}")
@@ -181,8 +205,9 @@ print()
 # =============================================================================
 
 print(f"Loading {MODEL_NAME}...")
-tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
-tokenizer.pad_token = tokenizer.eos_token
+tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True)
+if tokenizer.pad_token is None:
+    tokenizer.pad_token = tokenizer.eos_token
 tokenizer.padding_side = "left"
 
 base_model = AutoModelForCausalLM.from_pretrained(
@@ -192,6 +217,39 @@ base_model = AutoModelForCausalLM.from_pretrained(
     low_cpu_mem_usage=True
 ).to(DEVICE)
 base_model.eval()
+
+# Clamp requested LoRA layer range to actual model depth.
+num_hidden_layers = getattr(base_model.config, "num_hidden_layers", None)
+if isinstance(num_hidden_layers, int) and num_hidden_layers > 0:
+    if args.lora_last_n_layers > 0:
+        LAYER_START = max(0, num_hidden_layers - args.lora_last_n_layers)
+        LAYER_END = num_hidden_layers
+        print(f"Auto-targeting last {args.lora_last_n_layers} layers: [{LAYER_START}, {LAYER_END})")
+    orig_start, orig_end = LAYER_START, LAYER_END
+    LAYER_START = max(0, min(LAYER_START, num_hidden_layers - 1))
+    LAYER_END = max(LAYER_START + 1, min(LAYER_END, num_hidden_layers))
+    if (orig_start, orig_end) != (LAYER_START, LAYER_END):
+        print(
+            f"Adjusted layer range from [{orig_start}, {orig_end}) "
+            f"to [{LAYER_START}, {LAYER_END}) for model depth={num_hidden_layers}"
+        )
+    # #region agent log
+    _dbg_log(
+        "run_continual_ttt.py:model_init",
+        "layer_range_resolved",
+        {
+            "requested_start": orig_start,
+            "requested_end": orig_end,
+            "resolved_start": LAYER_START,
+            "resolved_end": LAYER_END,
+            "num_hidden_layers": num_hidden_layers,
+            "model_name": MODEL_NAME,
+        },
+        run_id="pre-fix",
+        hypothesis_id="H3",
+    )
+    # #endregion
+
 print(f"Base model loaded to: {next(base_model.parameters()).device}")
 print(f"Model layers targeted: {LAYER_START}-{LAYER_END-1}")
 
@@ -201,8 +259,9 @@ if NEIGHBOR_MODEL_NAME == MODEL_NAME:
     neighbor_model = base_model
 else:
     print(f"Loading {NEIGHBOR_MODEL_NAME}...")
-    neighbor_tokenizer = AutoTokenizer.from_pretrained(NEIGHBOR_MODEL_NAME)
-    neighbor_tokenizer.pad_token = neighbor_tokenizer.eos_token
+    neighbor_tokenizer = AutoTokenizer.from_pretrained(NEIGHBOR_MODEL_NAME, trust_remote_code=True)
+    if neighbor_tokenizer.pad_token is None:
+        neighbor_tokenizer.pad_token = neighbor_tokenizer.eos_token
     neighbor_tokenizer.padding_side = "left"
 
     neighbor_model = AutoModelForCausalLM.from_pretrained(
@@ -218,12 +277,14 @@ else:
 # HELPER FUNCTIONS
 # =============================================================================
 
-def get_late_layers_target_modules(start_layer, end_layer):
+def get_late_layers_target_modules(start_layer, end_layer, target_keys=None):
     """Generate target_modules for layers [start_layer, end_layer)."""
+    if target_keys is None:
+        target_keys = ["q_proj", "v_proj"]
     targets = []
     for layer_idx in range(start_layer, end_layer):
-        targets.append(f"model.layers.{layer_idx}.self_attn.q_proj")
-        targets.append(f"model.layers.{layer_idx}.self_attn.v_proj")
+        for key in target_keys:
+            targets.append(f"model.layers.{layer_idx}.self_attn.{key}")
     return targets
 
 
@@ -263,15 +324,16 @@ bin_mapper = RollingBinMapper(NUM_BINS, args.bin_window, args.bin_min_count, fix
 
 
 class PHGate:
-    """Page-Hinkley gated TTT trigger with fixed burst."""
+    """Page-Hinkley gated TTT trigger with fixed burst and optional cooldown."""
     
     def __init__(self, ema_alpha=0.05, ph_delta=0.05, ph_threshold=4.0, 
-                 ttt_burst=20, warmup=50):
+                 ttt_burst=20, warmup=50, cooldown=0):
         self.ema_alpha = ema_alpha
         self.ph_delta = ph_delta
         self.ph_threshold = ph_threshold
         self.ttt_burst = ttt_burst
         self.warmup = warmup
+        self.cooldown = cooldown
         
         self.ema = None
         self.data = []
@@ -280,12 +342,16 @@ class PHGate:
         self.m_down = self.m_down_min = 0.0
         
         self.ttt_remaining = 0
+        self.cooldown_remaining = 0
         self.total_triggers = 0
+        self.fresh_trigger = False
         self.t = 0
     
     def update(self, entropy: float) -> bool:
-        """Update with new entropy value. Returns True if TTT should run."""
+        """Update with new entropy value. Returns True if TTT should run.
+        Sets self.fresh_trigger = True on the first step of a new trigger."""
         self.t += 1
+        self.fresh_trigger = False
         
         if self.ema is None:
             self.ema = entropy
@@ -296,6 +362,10 @@ class PHGate:
         
         if self.t <= self.warmup:
             return True
+        
+        if self.cooldown_remaining > 0:
+            self.cooldown_remaining -= 1
+            return False
         
         segment_data = self.data[self.segment_start:]
         mean_t = np.mean(segment_data)
@@ -319,12 +389,15 @@ class PHGate:
         if ph_u > self.ph_threshold or ph_d > self.ph_threshold:
             self.ttt_remaining = self.ttt_burst
             self.total_triggers += 1
+            self.fresh_trigger = True
             self.segment_start = len(self.data)
             self.m_up = self.m_down = 0.0
             self.m_up_min = self.m_down_min = 0.0
         
         if self.ttt_remaining > 0:
             self.ttt_remaining -= 1
+            if self.ttt_remaining == 0 and self.cooldown > 0:
+                self.cooldown_remaining = self.cooldown
             return True
         return False
 
@@ -584,6 +657,18 @@ def get_soft_confidence(generated_ids, input_len, model, tokenizer):
     conf_mask = create_confidence_mask(generated_ids[:, input_len:], tokenizer)
     conf_pos = (conf_mask[0] == 1).nonzero(as_tuple=True)[0]
     if len(conf_pos) == 0:
+        # #region agent log
+        _dbg_log(
+            "run_continual_ttt.py:get_soft_confidence",
+            "soft_confidence_missing_position",
+            {
+                "input_len": int(input_len),
+                "decoded_tail_preview": tokenizer.decode(generated_ids[0][input_len:][:60], skip_special_tokens=True),
+            },
+            run_id="pre-fix",
+            hypothesis_id="H4",
+        )
+        # #endregion
         return None
     with torch.no_grad():
         logits = model(input_ids=generated_ids, attention_mask=torch.ones_like(generated_ids)).logits
@@ -694,7 +779,7 @@ def compute_calibration_metrics(results, prefix=""):
     }
 
 
-def get_baseline_answer(question, model, tokenizer):
+def get_baseline_answer(question, model, tokenizer, return_ids=False):
     """Get answer without test-time training."""
     prompt = create_qa_prompt(question)
     messages = [{"role": "user", "content": prompt}]
@@ -709,14 +794,21 @@ def get_baseline_answer(question, model, tokenizer):
             pad_token_id=tokenizer.eos_token_id
         )
     
-    response = tokenizer.decode(outputs[0][inputs['input_ids'].shape[1]:], skip_special_tokens=True)
-    del outputs
+    input_len = inputs['input_ids'].shape[1]
+    response = tokenizer.decode(outputs[0][input_len:], skip_special_tokens=True)
     
-    return {
+    result = {
         'answer': extract_answer(response),
         'confidence': extract_confidence(response),
         'response': response
     }
+    if return_ids:
+        result['generated_ids'] = outputs
+        result['input_len'] = input_len
+    else:
+        del outputs
+    
+    return result
 
 
 # =============================================================================
@@ -1021,6 +1113,20 @@ def train_single_question_discriminative(question, train_model, optimizer, token
                             loss = loss - F.logsigmoid(-diff)
                         n_pairs += 1
                     loss = loss / n_pairs if n_pairs > 0 else None
+                    # #region agent log
+                    _dbg_log(
+                        "run_continual_ttt.py:ranking_loss",
+                        "ranking_pairs_computed",
+                        {
+                            "n_pairs": int(n_pairs),
+                            "cur_ptrue": float(cur_ptrue),
+                            "buffer_size": len(ranking_buffer),
+                            "loss_is_none": bool(loss is None),
+                        },
+                        run_id="pre-fix",
+                        hypothesis_id="H1",
+                    )
+                    # #endregion
                 else:
                     loss = None
             elif args.use_mse_loss:
@@ -1039,7 +1145,14 @@ def train_single_question_discriminative(question, train_model, optimizer, token
                 bin_values = torch.arange(NUM_BINS, dtype=torch.float32, device=digit_probs.device)
                 expected_conf = (digit_probs * (bin_values + 0.5) / NUM_BINS).sum()
                 target_ptrue = torch.tensor(nd['p_true_norm'], dtype=torch.float32, device=expected_conf.device)
-                loss = (expected_conf - target_ptrue) ** 2
+                if args.use_directional_target:
+                    alpha = max(0.0, min(1.0, float(args.directional_alpha)))
+                    max_step = max(0.0, float(args.directional_clip))
+                    delta = torch.clamp(target_ptrue - expected_conf.detach(), min=-max_step, max=max_step)
+                    target_conf = expected_conf.detach() + alpha * delta
+                    loss = (expected_conf - target_conf) ** 2
+                else:
+                    loss = (expected_conf - target_ptrue) ** 2
             else:
                 labels = outputs.clone()
                 labels[:, :inputs['input_ids'].shape[1]] = -100
@@ -1411,7 +1524,8 @@ def run_continual_experiment():
         )
         print(f"W&B run: {run_name}")
     
-    target_modules = get_late_layers_target_modules(LAYER_START, LAYER_END)
+    lora_keys = [k.strip() for k in args.lora_target_keys.split(",")]
+    target_modules = get_late_layers_target_modules(LAYER_START, LAYER_END, target_keys=lora_keys)
     print(f"Target modules ({len(target_modules)}): {target_modules[:4]}...")
     
     lora_config = LoraConfig(
@@ -1450,10 +1564,12 @@ def run_continual_experiment():
             ph_delta=args.ph_delta,
             ph_threshold=args.ph_threshold,
             ttt_burst=args.ttt_burst,
-            warmup=args.ttt_warmup
+            warmup=args.ttt_warmup,
+            cooldown=args.ph_cooldown
         )
         print(f"PH Gate enabled: burst={args.ttt_burst}, warmup={args.ttt_warmup}, "
-              f"delta={args.ph_delta}, threshold={args.ph_threshold}, ema_alpha={args.ema_alpha}")
+              f"delta={args.ph_delta}, threshold={args.ph_threshold}, ema_alpha={args.ema_alpha}, "
+              f"cooldown={args.ph_cooldown}, reset_on_trigger={args.ph_reset_on_trigger}")
     
     for i, qa in enumerate(tqdm(questions, desc=f"Continual TTT ({args.mode})")):
         question = qa['question']
@@ -1466,6 +1582,33 @@ def run_continual_experiment():
             with train_model.disable_adapter():
                 entropy = compute_question_entropy(question, train_model, tokenizer)
             should_do_ttt = ph_gate.update(entropy)
+            if args.ph_reset_on_trigger and ph_gate.fresh_trigger:
+                with torch.no_grad():
+                    for name, param in train_model.named_parameters():
+                        if 'lora_A' in name:
+                            torch.nn.init.kaiming_uniform_(param, a=5**0.5)
+                        elif 'lora_B' in name:
+                            param.zero_()
+                optimizer = torch.optim.AdamW(train_model.parameters(), lr=args.lr)
+                print(f"  [PH RESET] Trigger #{ph_gate.total_triggers} at step {i+1} — LoRA zeroed, optimizer reset")
+            # #region agent log
+            _dbg_log(
+                "run_continual_ttt.py:main_loop_gate",
+                "ph_gate_decision",
+                {
+                    "step": i + 1,
+                    "domain": domain,
+                    "entropy": float(entropy),
+                    "should_do_ttt": bool(should_do_ttt),
+                    "fresh_trigger": bool(ph_gate.fresh_trigger),
+                    "cooldown_remaining": int(ph_gate.cooldown_remaining),
+                    "ttt_remaining": int(ph_gate.ttt_remaining),
+                    "total_triggers": int(ph_gate.total_triggers),
+                },
+                run_id="pre-fix",
+                hypothesis_id="H5",
+            )
+            # #endregion
         
         if no_accumulation and not args.baseline_only and should_do_ttt:
             with torch.no_grad():
@@ -1477,7 +1620,7 @@ def run_continual_experiment():
             optimizer = torch.optim.AdamW(train_model.parameters(), lr=args.lr)
         
         with train_model.disable_adapter():
-            baseline = get_baseline_answer(question, train_model, tokenizer)
+            baseline = get_baseline_answer(question, train_model, tokenizer, return_ids=args.use_soft_confidence)
         baseline_correct = answers_match(baseline['answer'], qa, dataset_type=dataset_type)
         
         if args.use_bin_gate and not args.baseline_only and should_do_ttt:
@@ -1517,7 +1660,21 @@ def run_continual_experiment():
                     use_p_know=args.use_p_know, claimed_bin=baseline['confidence']
                 )
 
-            if args.baseline_use_ptrue_norm:
+            if args.use_soft_confidence and baseline.get('generated_ids') is not None:
+                with train_model.disable_adapter(), torch.no_grad():
+                    soft_conf = get_soft_confidence(baseline['generated_ids'], baseline['input_len'], train_model, tokenizer)
+                del baseline['generated_ids']
+                if soft_conf is not None:
+                    baseline_conf_bin = p_true_to_bin(soft_conf)
+                else:
+                    baseline_conf_bin = baseline['confidence']
+                conf_prob = CONF_TO_PROB.get(baseline_conf_bin, 0.5)
+                brier = (conf_prob - float(is_correct)) ** 2
+                brier_p_true = (baseline_p_true - float(is_correct)) ** 2
+                baseline_conf_for_log = baseline_conf_bin
+                neighbor_p_trues = []
+                avg_p_true = baseline_p_true
+            elif args.baseline_use_ptrue_norm:
                 mc_opts = qa.get('mc_options')
                 ans_letter = _is_mc_answer(baseline['answer']) if mc_opts else None
                 if mc_opts and ans_letter and ans_letter in mc_opts:
@@ -1592,7 +1749,8 @@ def run_continual_experiment():
                 question, train_model, optimizer, tokenizer,
                 n_neighbors=args.n_neighbors, n_epochs=args.n_epochs, dataset_type=dataset_type,
                 neighbors_only=args.neighbors_only, mc_options=qa.get('mc_options'),
-                nb_model=neighbor_model, nb_tokenizer=neighbor_tokenizer
+                nb_model=neighbor_model, nb_tokenizer=neighbor_tokenizer,
+                ranking_buffer=ranking_buffer
             )
             
             is_correct = answers_match(ttt_result['answer'], qa, dataset_type=dataset_type)
@@ -1630,13 +1788,58 @@ def run_continual_experiment():
             }
         
         else:
-            # Skipped (PH or bin gate): report baseline verbalized, no training
-            answer, confidence = baseline['answer'], baseline['confidence']
+            # Skipped (PH or bin gate): no training, but use adapted model for readout
+            if args.use_soft_confidence:
+                # Generate with adapted model (LoRA enabled) and read soft confidence
+                _sp = create_qa_prompt(question)
+                _si = tokenizer(tokenizer.apply_chat_template([{"role": "user", "content": _sp}], tokenize=False, add_generation_prompt=True), return_tensors="pt", truncation=True, max_length=1024).to(train_model.device)
+                with torch.no_grad():
+                    _so = train_model.generate(**_si, max_new_tokens=200, do_sample=False, pad_token_id=tokenizer.eos_token_id)
+                _sr = tokenizer.decode(_so[0][_si['input_ids'].shape[1]:], skip_special_tokens=True)
+                answer = extract_answer(_sr)
+                soft_conf = get_soft_confidence(_so, _si['input_ids'].shape[1], train_model, tokenizer)
+                del _so
+                if soft_conf is not None:
+                    confidence = p_true_to_bin(soft_conf)
+                else:
+                    confidence = extract_confidence(_sr)
+                skip_response = _sr
+                # #region agent log
+                _dbg_log(
+                    "run_continual_ttt.py:skip_path",
+                    "skip_soft_readout",
+                    {
+                        "step": i + 1,
+                        "soft_conf_is_none": bool(soft_conf is None),
+                        "confidence_bin": int(confidence),
+                        "answer_preview": str(answer)[:80],
+                    },
+                    run_id="pre-fix",
+                    hypothesis_id="H2",
+                )
+                # #endregion
+            else:
+                answer, confidence = baseline['answer'], baseline['confidence']
+                skip_response = baseline['response']
             is_correct = answers_match(answer, qa, dataset_type=dataset_type)
             conf_prob = CONF_TO_PROB.get(confidence, 0.5)
             brier = (conf_prob - float(is_correct)) ** 2
             with torch.no_grad():
-                skip_p_true = get_discriminative_confidence(question, answer, baseline['response'], train_model, tokenizer, use_p_know=args.use_p_know, claimed_bin=confidence)
+                skip_p_true = get_discriminative_confidence(question, answer, skip_response, train_model, tokenizer, use_p_know=args.use_p_know, claimed_bin=confidence)
+            # #region agent log
+            _dbg_log(
+                "run_continual_ttt.py:skip_path",
+                "skip_ptrue_response_source",
+                {
+                    "step": i + 1,
+                    "used_soft_skip": bool(args.use_soft_confidence),
+                    "skip_response_matches_baseline_response": bool(skip_response == baseline.get('response', '')),
+                    "answer_preview": str(answer)[:80],
+                },
+                run_id="pre-fix",
+                hypothesis_id="H2",
+            )
+            # #endregion
             brier_p_true = (skip_p_true - float(is_correct)) ** 2
             result = {
                 'question': question[:200], 'ground_truth': ground_truth, 'domain': domain,
@@ -1740,6 +1943,8 @@ def run_continual_experiment():
                 log_dict["gate/total_triggers"] = ph_gate.total_triggers
                 log_dict["gate/ema_entropy"] = ph_gate.ema if ph_gate.ema else 0.0
                 log_dict["gate/ttt_skipped"] = int(result.get('ttt_skipped', False))
+                log_dict["gate/fresh_trigger"] = int(ph_gate.fresh_trigger)
+                log_dict["gate/cooldown_remaining"] = ph_gate.cooldown_remaining
             wandb.log(log_dict, step=n)
         
         # FIXED: Skip domain summaries in interleaved mode to avoid spam
