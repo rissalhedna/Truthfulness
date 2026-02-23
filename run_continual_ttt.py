@@ -90,6 +90,7 @@ parser.add_argument('--layer_start', type=int, default=24, help='First layer to 
 parser.add_argument('--layer_end', type=int, default=32, help='Last layer (exclusive) to apply LoRA (default: 32)')
 parser.add_argument('--lora_last_n_layers', type=int, default=0, help='If >0, auto-target last N layers (overrides layer_start/layer_end)')
 parser.add_argument('--lora_target_keys', type=str, default='q_proj,v_proj', help='Comma-separated attention module suffixes to target (e.g. q_proj,v_proj or qkv_proj)')
+parser.add_argument('--trust_remote_code', action='store_true', help='Pass trust_remote_code=True to model/tokenizer loading (default: False)')
 args = parser.parse_args()
 
 # Handle accumulation flags
@@ -205,7 +206,7 @@ print()
 # =============================================================================
 
 print(f"Loading {MODEL_NAME}...")
-tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True)
+tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=args.trust_remote_code)
 if tokenizer.pad_token is None:
     tokenizer.pad_token = tokenizer.eos_token
 tokenizer.padding_side = "left"
@@ -213,7 +214,7 @@ tokenizer.padding_side = "left"
 base_model = AutoModelForCausalLM.from_pretrained(
     MODEL_NAME,
     torch_dtype=torch.bfloat16,
-    trust_remote_code=True,
+    trust_remote_code=args.trust_remote_code,
     low_cpu_mem_usage=True
 ).to(DEVICE)
 base_model.eval()
@@ -259,7 +260,7 @@ if NEIGHBOR_MODEL_NAME == MODEL_NAME:
     neighbor_model = base_model
 else:
     print(f"Loading {NEIGHBOR_MODEL_NAME}...")
-    neighbor_tokenizer = AutoTokenizer.from_pretrained(NEIGHBOR_MODEL_NAME, trust_remote_code=True)
+    neighbor_tokenizer = AutoTokenizer.from_pretrained(NEIGHBOR_MODEL_NAME, trust_remote_code=args.trust_remote_code)
     if neighbor_tokenizer.pad_token is None:
         neighbor_tokenizer.pad_token = neighbor_tokenizer.eos_token
     neighbor_tokenizer.padding_side = "left"
@@ -267,7 +268,7 @@ else:
     neighbor_model = AutoModelForCausalLM.from_pretrained(
         NEIGHBOR_MODEL_NAME,
         torch_dtype=torch.bfloat16,
-        trust_remote_code=True,
+        trust_remote_code=args.trust_remote_code,
         low_cpu_mem_usage=True
     ).to(DEVICE)
     neighbor_model.eval()
