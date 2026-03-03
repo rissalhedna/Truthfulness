@@ -85,6 +85,7 @@ parser.add_argument('--directional_clip', type=float, default=0.15, help='Max ab
 parser.add_argument('--use_ranking_loss', action='store_true', help='Use pairwise ranking loss against buffer of past questions')
 parser.add_argument('--ranking_buffer_size', type=int, default=16, help='Number of past questions in ranking buffer')
 parser.add_argument('--use_soft_confidence', action='store_true', help='Report soft expected confidence from digit logits instead of hard argmax')
+parser.add_argument('--kl_reg_beta', type=float, default=0.0, help='KL divergence regularization weight against base model (0=disabled)')
 # Layer targeting arguments
 parser.add_argument('--layer_start', type=int, default=24, help='First layer to apply LoRA (default: 24 for late layers)')
 parser.add_argument('--layer_end', type=int, default=32, help='Last layer (exclusive) to apply LoRA (default: 32)')
@@ -1177,6 +1178,21 @@ def train_single_question_discriminative(question, train_model, optimizer, token
                 
                 loss = model_output.loss
             if loss is not None and not torch.isnan(loss):
+                if args.kl_reg_beta > 0:
+                    input_len = inputs['input_ids'].shape[1]
+                    adapted_logits = model_output.logits[:, input_len:, :]
+                    with torch.no_grad(), train_model.disable_adapter():
+                        base_output = train_model(input_ids=outputs,
+                                                   attention_mask=torch.ones_like(outputs))
+                    base_logits = base_output.logits[:, input_len:, :].detach()
+                    kl = F.kl_div(
+                        F.log_softmax(adapted_logits, dim=-1),
+                        F.softmax(base_logits, dim=-1),
+                        reduction="batchmean"
+                    )
+                    loss = loss + args.kl_reg_beta * kl
+                    del base_output, base_logits, adapted_logits
+
                 loss.backward()
                 valid_samples += 1
                 epoch_losses.append(loss.item())
