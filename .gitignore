@@ -8,7 +8,10 @@
 !entropy_across_domains.png
 !page_hinkley_entropy.py
 !test_real_pipeline.py
-
+!/results/
+/results/*
+!/results/APPENDIX.tex
+!/results/FULL_RESULTS.md
 
 # --- 3. Essential Project Files (Highly Recommended to keep) ---
 !requirements.txt
