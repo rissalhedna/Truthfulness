@@ -91,6 +91,7 @@ Model-specific values are noted where applicable.}
   & Llama 3.2-3B & 0.7 \\
   & Gemma 2-2B & 1.5 \\
   & Phi 3.5-Mini & 1.5 \\
+  & Llama 3.1-8B & 3.0 \\
 \addlinespace
 \multirow{2}{*}{Other}
   & Weight accumulation & On \\
@@ -619,7 +620,7 @@ We use $\beta{=}0$ (no KL term) in all reported experiments.
 
 
 % ============================================================================
-\section{Effect of Distractor Normalization} \label{app:reliability}
+\section{Reliability Diagrams and Normalization Effect} \label{app:reliability}
 % ============================================================================
 
 Figure~\ref{fig:ptrue_norm} compares reliability diagrams for raw
@@ -1003,7 +1004,7 @@ yielding lower raw ECE and---by the inheritance
 property---lower trained ECE.
 
 The raw PTN signal (ECE$=$0.065) is better calibrated than the
-raw SC signal (ECE$=$0.095) \emph{before any training}.
+raw SC signal (ECE$=$0.093) \emph{before any training}.
 After SECL training with the PTN target, the model's verbalized
 confidence inherits this calibration (ECE$=$0.050), while training
 with the SC target amplifies SC's biases (ECE$=$0.432).
@@ -1033,7 +1034,7 @@ supervision signal for SECL training.}
 
 \begin{figure}[h]
 \centering
-\includegraphics[width=\textwidth]{figures/target_distributions.png}
+\includegraphics[width=\columnwidth]{figures/target_distributions.png}
 \caption{Confidence score distributions for correct (green) and
 incorrect (red) predictions on Llama~3.2-3B.
 \textbf{Top row} (target signals):
@@ -1102,7 +1103,7 @@ lowest inference cost.
 
 \begin{figure}[h]
 \centering
-\includegraphics[width=0.65\textwidth]{figures/pareto_cost_vs_ece.png}
+\includegraphics[width=\columnwidth]{figures/pareto_cost_vs_ece.png}
 \caption{Calibration (ECE) vs.\ inference cost for all methods
 on Llama~3.2-3B.
 SECL achieves the lowest ECE with a single inference pass,
