@@ -92,6 +92,9 @@ parser.add_argument('--layer_end', type=int, default=32, help='Last layer (exclu
 parser.add_argument('--lora_last_n_layers', type=int, default=0, help='If >0, auto-target last N layers (overrides layer_start/layer_end)')
 parser.add_argument('--lora_target_keys', type=str, default='q_proj,v_proj', help='Comma-separated attention module suffixes to target (e.g. q_proj,v_proj or qkv_proj)')
 parser.add_argument('--trust_remote_code', action='store_true', help='Pass trust_remote_code=True to model/tokenizer loading (default: False)')
+parser.add_argument('--use_sc_target', action='store_true', help='Use Self-Consistency agreement as TTT target instead of P(True) Norm')
+parser.add_argument('--sc_n_samples', type=int, default=10, help='Number of temperature samples for SC target')
+parser.add_argument('--sc_temperature', type=float, default=0.7, help='Sampling temperature for SC target')
 args = parser.parse_args()
 
 # Handle accumulation flags
@@ -892,6 +895,31 @@ def find_optimal_temperature(val_results, temperature_range=None):
 # DISCRIMINATIVE TTT TRAINING
 # =============================================================================
 
+def compute_sc_agreement(question, greedy_answer, model, tokenizer, n_samples, temperature, dataset_type="auto"):
+    """Compute unsupervised Self-Consistency: fraction of temperature samples agreeing with greedy answer."""
+    prompt = create_qa_prompt(question)
+    messages = [{"role": "user", "content": prompt}]
+    input_text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+    inputs = tokenizer(input_text, return_tensors="pt", truncation=True, max_length=1024).to(model.device)
+    agree = 0
+    for _ in range(n_samples):
+        with torch.no_grad():
+            out = model.generate(
+                **inputs,
+                max_new_tokens=200,
+                do_sample=True,
+                temperature=temperature,
+                top_p=0.95,
+                pad_token_id=tokenizer.eos_token_id,
+            )
+        resp = tokenizer.decode(out[0][inputs['input_ids'].shape[1]:], skip_special_tokens=True)
+        sampled_ans = extract_answer(resp)
+        if answers_match(sampled_ans, {'ground_truth_answer': greedy_answer}, dataset_type=dataset_type):
+            agree += 1
+        del out
+    return agree / n_samples
+
+
 def train_single_question_discriminative(question, train_model, optimizer, tokenizer, n_neighbors=5, n_epochs=3, dataset_type="auto", neighbors_only=False, mc_options=None, nb_model=None, nb_tokenizer=None, ranking_buffer=None):
     """Train on a single question using discriminative P(True) as pseudo-label.
     
@@ -963,43 +991,52 @@ def train_single_question_discriminative(question, train_model, optimizer, token
             pknow_values.append(p_know)
             del outputs
             
-            # Use structured mc_options when the answer is a valid MCQ letter;
-            # otherwise fall back to distractor generation.
-            use_mc = mc_options if (mc_options and (args.reuse_mcq_options or difficulty == 'input')) else None
-            ans_letter = _is_mc_answer(answer) if use_mc else None
-            if use_mc and ans_letter and ans_letter in use_mc:
-                # Answer at index 0 (required by normalize_p_true_sharpened),
-                # then remaining options in sorted order — no duplicates.
-                candidates = [f"{ans_letter}. {use_mc[ans_letter]}"]
-                for ltr in sorted(use_mc.keys()):
-                    if ltr != ans_letter:
-                        candidates.append(f"{ltr}. {use_mc[ltr]}")
+            if args.use_sc_target:
+                sc_score = compute_sc_agreement(
+                    q, answer, train_model, tokenizer,
+                    n_samples=args.sc_n_samples,
+                    temperature=args.sc_temperature,
+                    dataset_type=dataset_type,
+                )
+                p_true_raw = sc_score
+                p_true_norm = sc_score
+                no_distractors = False
             else:
-                distractors = generate_distractors(q, answer, train_model, tokenizer, k=args.k_distractors, mc_options=mc_options)
-                candidates = [answer] + distractors
-            
-            no_distractors = len(candidates) <= 1
-            
-            p_scores = []
-            with torch.no_grad():
-                for cand in candidates:
-                    p_cand = get_discriminative_confidence(
-                        q,
-                        cand,
-                        response,
-                        train_model,
-                        tokenizer,
-                        use_p_know=False,
-                        claimed_bin=None,
-                        candidate_list=candidates,
-                    )
-                    p_scores.append(p_cand)
-            p_true_raw = p_scores[0]
-            
-            if no_distractors:
-                p_true_norm = p_true_raw
-            else:
-                p_true_norm = normalize_p_true_sharpened(p_scores, temperature=args.norm_temperature)
+                # Use structured mc_options when the answer is a valid MCQ letter;
+                # otherwise fall back to distractor generation.
+                use_mc = mc_options if (mc_options and (args.reuse_mcq_options or difficulty == 'input')) else None
+                ans_letter = _is_mc_answer(answer) if use_mc else None
+                if use_mc and ans_letter and ans_letter in use_mc:
+                    candidates = [f"{ans_letter}. {use_mc[ans_letter]}"]
+                    for ltr in sorted(use_mc.keys()):
+                        if ltr != ans_letter:
+                            candidates.append(f"{ltr}. {use_mc[ltr]}")
+                else:
+                    distractors = generate_distractors(q, answer, train_model, tokenizer, k=args.k_distractors, mc_options=mc_options)
+                    candidates = [answer] + distractors
+                
+                no_distractors = len(candidates) <= 1
+                
+                p_scores = []
+                with torch.no_grad():
+                    for cand in candidates:
+                        p_cand = get_discriminative_confidence(
+                            q,
+                            cand,
+                            response,
+                            train_model,
+                            tokenizer,
+                            use_p_know=False,
+                            claimed_bin=None,
+                            candidate_list=candidates,
+                        )
+                        p_scores.append(p_cand)
+                p_true_raw = p_scores[0]
+                
+                if no_distractors:
+                    p_true_norm = p_true_raw
+                else:
+                    p_true_norm = normalize_p_true_sharpened(p_scores, temperature=args.norm_temperature)
             
             neighbor_data.append({
                 'question': q,

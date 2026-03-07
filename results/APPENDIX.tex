@@ -6,18 +6,18 @@
 
 \paragraph{Datasets and splits.}
 We evaluate on four domains presented sequentially: 
-GSM8K \citep{cobbe2021gsm8k} (\texttt{train} split), 
-MMLU \citep{hendrycks2021mmlu} (\texttt{test} split), 
-ARC-Challenge \citep{clark2018arc} (\texttt{test} split), 
-and TruthfulQA \citep{lin2022truthfulqa} (\texttt{validation} split, MC1 variant).
+GSM8K \citep{cobbe_training_2021} (\texttt{train} split), 
+MMLU \citep{hendrycks_measuring_2021} (\texttt{test} split), 
+ARC-Challenge \citep{clark_think_2018} (\texttt{test} split), 
+and TruthfulQA \citep{lin_truthfulqa_2021} (\texttt{validation} split, MC1 variant).
 We sample 500 questions per domain for a total of 2{,}000 questions per run.
 The default domain order is GSM8K $\to$ MMLU $\to$ ARC $\to$ TruthfulQA.
 
 \paragraph{Models.}
-We evaluate on three instruction-tuned LLMs spanning 2--4B parameters:
-Llama~3.2-3B-Instruct \citep{touvron2023llama},
-Gemma~2-2B-IT \citep{team2024gemma},
-and Phi~3.5-Mini-Instruct \citep{abdin2024phi}.
+We evaluate on four instruction-tuned LLMs spanning 2--8B parameters:
+Llama~3.2-3B-Instruct and Llama~3.1-8B-Instruct \citep{grattafiori_llama_2024},
+Gemma~2-2B-IT \citep{team_gemma_2024},
+and Phi~3.5-Mini-Instruct \citep{abdin_phi3_2024}.
 
 \paragraph{Trainable parameters.}
 Table~\ref{tab:lora_params} reports the exact LoRA parameter counts per model.
@@ -124,16 +124,16 @@ to the choice of binning strategy.
 \midrule
 \multirow{6}{*}{Llama 3.2-3B}
   & Soft Verbalized     & .170 & .167 & .292 & .510 & .576 \\
-  & Self-Consistency    & .111 & --- & .215 & \textbf{.718} & .624 \\
+  & Self-Consistency$^\dagger$  & .093 & .096 & \textbf{.211} & \textbf{.728} & .624 \\
   & ~~+ Temp Scaling$^*$ & .047 & .075 & .250 & .504 & .576 \\
-  & P(True) Norm        & .065 & .064 & .223 & .693 & .576 \\
-  & ~~+ Temp Scaling$^*$ & \textbf{.032} & \textbf{.035} & \textbf{.222} & .676 & .576 \\
+  & P(True) Norm        & .065 & .067 & .223 & .694 & .576 \\
+  & ~~+ Temp Scaling$^*$ & \textbf{.029} & \textbf{.030} & .218 & .692 & .576 \\
   & SECL (Ours)         & \underline{.050} & \underline{.060} & .241 & .587 & .577 \\
 \addlinespace
 \multirow{5}{*}{Gemma 2-2B}
   & Soft Verbalized     & .256 & .252 & .314 & .558 & .516 \\
   & ~~+ Temp Scaling$^*$ & .047 & .037 & .249 & .550 & .516 \\
-  & P(True) Norm        & .141 & .144 & .258 & \textbf{.650} & .516 \\
+  & P(True) Norm        & .141 & .142 & .259 & \textbf{.650} & .516 \\
   & ~~+ Temp Scaling$^*$ & \textbf{.037} & \textbf{.033} & \textbf{.233} & .647 & .516 \\
   & SECL (Ours)         & \underline{.056} & \underline{.060} & .254 & .548 & .515 \\
 \addlinespace
@@ -148,6 +148,12 @@ to the choice of binning strategy.
 \vspace{0.3em}
 \newline
 {\footnotesize $^*$Requires ground-truth labels; fitted via 5-fold cross-validation. See \S\ref{app:posthoc}.}
+\newline
+{\footnotesize $^\dagger$Self-Consistency requires $N{=}10$ sampling
+passes per question. We report it for Llama~3.2-3B only to
+contextualize SECL's single-pass efficiency; it is omitted for
+other models as it measures generation consistency rather than
+calibration directly.}
 \end{table}
 
 
@@ -156,8 +162,8 @@ to the choice of binning strategy.
 % ============================================================================
 
 We compare SECL against standard post-hoc calibration methods:
-\textbf{temperature scaling} \citep{guo2017calibration} (single parameter $T$
-fitted to minimize NLL) and \textbf{Platt scaling} \citep{platt1999probabilistic}
+\textbf{temperature scaling} \citep{guo_calibration_2017} (single parameter $T$
+fitted to minimize NLL) and \textbf{Platt scaling} \citep{platt_probabilistic_1999}
 (logistic regression $\sigma(a \cdot c + b)$).
 Both are applied to the soft verbalized confidence and fitted via 5-fold 
 cross-validation (each fold uses 1{,}600 labeled examples for fitting).
@@ -189,7 +195,7 @@ weak verbalized discrimination (fitted $T$ shown).}
 \multirow{4}{*}{Llama}
   & SV + Temp ($T{=}17.6$)  & .047 & .075 & .250 & .504 & [.44,\,.56] \\
   & SV + Platt              & .021 & .057 & .244 & .481 & [.56,\,.61] \\
-  & PTN + Temp ($T{=}1.8$)  & .032 & .035 & .222 & .676 & [.15,\,.85] \\
+  & PTN + Temp ($T{=}1.8$)  & .029 & .030 & .218 & .692 & [.14,\,.86] \\
   & SECL (no labels)        & .050 & .060 & .241 & .587 & [.05,\,.85] \\
 \addlinespace
 \multirow{4}{*}{Gemma}
@@ -243,7 +249,7 @@ SECL's discrimination improvements.}
   & \textbf{Brier}$\downarrow$ & \textbf{AUROC}$\uparrow$ \\
 \midrule
 \multirow{3}{*}{Llama}
-  & PTN + Temp$^*$  & .032 & .035 & .222 & .676 \\
+  & PTN + Temp$^*$  & .029 & .030 & .218 & .692 \\
   & SECL            & .050 & .060 & .241 & .587 \\
   & SECL + Temp$^*$ & .049 & .053 & .241 & .584 \\
 \addlinespace
@@ -282,6 +288,88 @@ By comparison, supervised temperature scaling also reduces AUROC
 and Platt scaling degrades it further for Llama ($-$.029, below chance at .481),
 demonstrating that AUROC loss is not unique to SECL but is an inherent
 cost of recalibrating overconfident models.
+
+
+% ============================================================================
+\section{P(True) Normalization and the Generation--Discrimination Gap} \label{app:ptrue_norm}
+% ============================================================================
+
+A key premise of SECL is that LLMs possess a \emph{discriminative} 
+confidence signal---P(True)---that is better calibrated than their 
+\emph{generative} verbalized confidence.
+Table~\ref{tab:ptrue_raw_vs_norm} demonstrates this gap and the 
+effect of normalization.
+
+\paragraph{Raw P(True) vs.\ Soft Verbalized.}
+For Llama, raw P(True) (the model's probability that its own answer 
+is correct, without normalization) already improves calibration over 
+Soft Verbalized (ECE: .149 vs.\ .170) and dramatically improves 
+discrimination (AUROC: .673 vs.\ .510).
+This confirms that the model ``knows more than it says''---its 
+internal judgment of correctness is more reliable than its 
+expressed confidence.
+
+\paragraph{Normalization with distractors.}
+P(True) Norm applies a temperature-scaled softmax over the correct 
+answer and $k{=}4$ distractors, converting a raw probability into a 
+calibrated confidence score.
+This yields a large further improvement (Llama ECE: .149 $\to$ .065 
+at $\tau{=}0.7$), demonstrating that relative comparison against 
+plausible alternatives sharpens the discriminative signal.
+
+\begin{table}[h]
+\centering
+\caption{Effect of P(True) normalization (Llama~3.2-3B, $N{=}2{,}000$).
+Raw P(True) improves over Soft Verbalized; normalization with 
+temperature $\tau$ yields further gains.
+The optimal $\tau$ varies by model (see Table~\ref{tab:tau_sweep}).}
+\label{tab:ptrue_raw_vs_norm}
+\small
+\begin{tabular}{@{}lcccc@{}}
+\toprule
+\textbf{Method}
+  & \textbf{ECE}$\downarrow$ & \textbf{Brier}$\downarrow$
+  & \textbf{AUROC}$\uparrow$ & \textbf{Acc} \\
+\midrule
+Soft Verbalized        & .170 & .292 & .510 & .576 \\
+Raw P(True)            & .149 & .248 & .673 & .576 \\
+P(True) Norm $\tau{=}0.3$ & .118 & .238 & .685 & .576 \\
+P(True) Norm $\tau{=}0.7$ & \textbf{.065} & \textbf{.223} & \textbf{.694} & .576 \\
+P(True) Norm $\tau{=}1.5$ & .169 & .254 & .658 & .579 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Temperature selection.}
+The normalization temperature $\tau$ controls sharpening ($\tau{<}1$) 
+or smoothing ($\tau{>}1$) of the softmax over candidates.
+Table~\ref{tab:tau_sweep} shows the P(True) Norm ECE at different 
+$\tau$ values for each model.
+Llama benefits from sharpening ($\tau{=}0.7$), while Gemma and Phi 
+require smoothing ($\tau{=}1.5$), likely reflecting differences in 
+the models' internal confidence distributions.
+The selected $\tau$ is used in all subsequent experiments.
+
+\begin{table}[h]
+\centering
+\caption{P(True) Norm ECE as a function of normalization 
+temperature $\tau$. Bold: selected value per model.}
+\label{tab:tau_sweep}
+\small
+\begin{tabular}{@{}lccc@{}}
+\toprule
+$\boldsymbol{\tau}$ & \textbf{Llama 3.2-3B} & \textbf{Gemma 2-2B} & \textbf{Phi 3.5-Mini} \\
+\midrule
+0.3  & .118 & ---  & --- \\
+0.7  & \textbf{.065} & .215$^\dagger$ & .168$^\dagger$ \\
+1.0  & ---  & .180$^\dagger$ & .161$^\dagger$ \\
+1.5  & .169 & \textbf{.141} & \textbf{.154} \\
+\bottomrule
+\end{tabular}
+\vspace{0.3em}
+\newline
+{\footnotesize $^\dagger$Evaluated on 400 questions (100/domain); all other values on 2{,}000.}
+\end{table}
 
 
 % ============================================================================
@@ -531,6 +619,66 @@ We use $\beta{=}0$ (no KL term) in all reported experiments.
 
 
 % ============================================================================
+\section{Effect of Distractor Normalization} \label{app:reliability}
+% ============================================================================
+
+Figure~\ref{fig:ptrue_norm} compares reliability diagrams for raw
+$P(\text{True})$ and distractor-normalized
+$\text{NormP}_{\text{True}}$ on Llama~3.2-3B.
+Raw $P(\text{True})$ exhibits upward bias in mid-to-high confidence
+bins, consistent with the suggestibility effect documented by
+\citet{wang_calibrating_2025}: the model tends to affirm
+plausible-sounding answers regardless of correctness.
+Distractor normalization removes this bias by converting
+absolute affirmation into relative preference among candidate
+answers, reducing ECE from 0.149 to 0.065.
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=\columnwidth]{figures/2_ptrue_vs_norm_llama.png}
+    \caption{Raw $P(\text{True})$ (\textbf{left}) vs.\
+    distractor-normalized $\text{NormP}_{\text{True}}$
+    (\textbf{right}) on Llama~3.2-3B.
+    Normalization suppresses suggestibility bias, producing a
+    better-calibrated supervision signal
+    (ECE: 0.149\,$\to$\,0.065).}
+    \label{fig:ptrue_norm}
+\end{figure}
+
+Figure~\ref{fig:ptrue_norm_all} extends this comparison to all three
+models. Gemma~2-2B benefits the most (ECE: 0.369\,$\to$\,0.141),
+while Phi~3.5-Mini shows a similarly large reduction
+(ECE: 0.248\,$\to$\,0.154).
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=\columnwidth]{figures/1_ptrue_vs_norm_all.png}
+    \caption{Raw $P(\text{True})$ (\textbf{left}) vs.\
+    $\text{NormP}_{\text{True}}$ (\textbf{right}) for all three
+    models.  Distractor normalization consistently reduces
+    calibration error across model families.}
+    \label{fig:ptrue_norm_all}
+\end{figure}
+
+Reliability diagrams for Soft Verbalized vs.\ SECL on all three
+models are shown in Figure~\ref{fig:rel_all}.
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=\columnwidth]{figures/4_secl_vs_verb_all.png}
+    \caption{Reliability diagrams: Soft Verbalized (\textbf{left})
+    vs.\ SECL (\textbf{right}) for Llama~3.2-3B
+    (ECE: 0.170\,$\to$\,0.050), Gemma~2-2B
+    (ECE: 0.256\,$\to$\,0.056), and Phi~3.5-Mini
+    (ECE: 0.251\,$\to$\,0.115).
+    SECL consistently shifts predictions toward the diagonal,
+    eliminating the systematic overconfidence visible in the
+    Soft Verbalized baselines.}
+    \label{fig:rel_all}
+\end{figure}
+
+
+% ============================================================================
 \section{Domain Order Sensitivity} \label{app:domain_order}
 % ============================================================================
 
@@ -742,8 +890,8 @@ to Soft Verbalized while adapting only 12.6\% of questions.}
   & \textbf{ECE}$\downarrow$ & \textbf{Brier}$\downarrow$
   & \textbf{AUROC}$\uparrow$ & \textbf{Acc} \\
 \midrule
-Soft Verbalized      & .225 & .258 & \textbf{.684} & .644 \\
-P(True) Norm         & .120 & \textbf{.211} & .718 & .646 \\
+Soft Verbalized      & .225 & .258 & .684 & .644 \\
+P(True) Norm         & .120 & \textbf{.210} & \textbf{.728} & .646 \\
 SECL (Ours)          & \textbf{.083} & .222 & .643 & .646 \\
 \bottomrule
 \end{tabular}
@@ -782,3 +930,187 @@ on GSM8K, MMLU, and TruthfulQA, with ARC remaining resistant to
 improvement (see domain ordering analysis in \S\ref{app:domain_order}).
 The PH detector triggers on 12.6\% of questions, intermediate between
 the 3B models' 5.9--25.6\% range.
+
+
+% ============================================================================
+\section{Ablation: Training Target Signal}
+\label{app:target_ablation}
+% ============================================================================
+
+A natural question is whether P(True) Norm is the right pseudo-label
+for SECL training.
+Self-Consistency (SC) is an alternative unsupervised signal that
+measures agreement among $N{=}10$ temperature-sampled answers.
+We run the full SECL pipeline (LoRA adaptation, PH-gating,
+burst training, MSE loss) with SC as the training target, keeping
+all other hyperparameters identical to the canonical configuration.
+
+\begin{table}[h]
+\centering
+\caption{Effect of training target on Llama~3.2-3B.
+All rows use the same SECL pipeline; only the pseudo-label
+differs. Self-Consistency as a target degrades calibration below
+the untrained baseline.}
+\label{tab:target_ablation}
+\small
+\begin{tabular}{@{}lcccc@{}}
+\toprule
+\textbf{Training Target}
+  & \textbf{ECE}$\downarrow$ & \textbf{Brier}$\downarrow$
+  & \textbf{AUROC}$\uparrow$ & \textbf{Acc} \\
+\midrule
+None (Soft Verbalized)     & .170 & .292 & .510 & .576 \\
+Self-Consistency ($N{=}10$) & .432 & .470 & .443 & .564 \\
+P(True) Norm (ours)        & \textbf{.050} & \textbf{.241} & \textbf{.587} & \textbf{.577} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Why the target signal determines calibration quality.}
+SECL minimizes $\mathcal{L} = \mathbb{E}[(c(q) - t(q))^2]$, where
+$c(q)$ is the model's verbalized confidence and $t(q)$ is the
+training target.
+With sufficient model capacity and training convergence,
+$c^*(q) \to t(q)$, so the trained model \emph{inherits the
+calibration of its target}:
+$\mathrm{ECE}(c^*) \to \mathrm{ECE}(t)$.
+The choice of target therefore bounds the achievable calibration.
+
+\paragraph{SC is a biased proxy for correctness.}
+As $N \to \infty$, SC$(q) \to p_{\mathrm{gen}}(\text{mode} \mid q)$,
+the probability mass the generation distribution places on its modal
+answer.
+For modern LLMs, the generation distribution is low-entropy:
+$p_{\mathrm{gen}}(\text{mode} \mid q)$ is typically high
+($>$0.7) regardless of whether the answer is correct.
+Among questions where SC~$\approx 1$, the actual fraction correct
+can be significantly below~1, violating the calibration condition
+$P(Y{=}1 \mid c{=}p) = p$.
+Training on SC therefore teaches the model to report generation
+concentration as confidence, producing systematic overconfidence.
+
+\paragraph{PTN is a less biased proxy.}
+P(True) Norm computes $\mathrm{softmax}(\log P(\text{True} \mid
+q, a_i) / \tau)_0$ over the model's answer and $k$ distractors.
+When the model cannot distinguish its answer from distractors
+(equal $P(\text{True})$ scores), PTN~$\to 1/(k{+}1)$,
+correctly indicating low confidence.
+When the model strongly prefers its answer,
+PTN~$\to 1$.
+This normalization maps the discriminative signal onto $[0,1]$
+with tighter correspondence to correctness probability,
+yielding lower raw ECE and---by the inheritance
+property---lower trained ECE.
+
+The raw PTN signal (ECE$=$0.065) is better calibrated than the
+raw SC signal (ECE$=$0.095) \emph{before any training}.
+After SECL training with the PTN target, the model's verbalized
+confidence inherits this calibration (ECE$=$0.050), while training
+with the SC target amplifies SC's biases (ECE$=$0.432).
+Figure~\ref{fig:sc_ptrue_norm_llama} provides direct visual
+evidence via reliability diagrams: SC produces a monotonically
+increasing but biased calibration curve, Raw P(True) suffers from
+suggestibility bias in mid-to-high bins, while P(True) Norm
+tracks the diagonal most closely.
+Figure~\ref{fig:target_distributions} complements this with
+score distributions, showing that PTN achieves the best
+separation between correct and incorrect predictions.
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=\columnwidth]{figures/6_sc_vs_ptrue_vs_norm_llama.png}
+\caption{Reliability diagrams comparing candidate training
+targets on Llama~3.2-3B.
+Self-Consistency (\textbf{left}, ECE$=$0.093) produces a
+reasonable calibration curve but with systematic bias.
+Raw P(True) (\textbf{center}, ECE$=$0.149) exhibits upward
+bias from suggestibility.
+P(True) Norm (\textbf{right}, ECE$=$0.065) tracks the
+diagonal most closely, confirming it as the best-calibrated
+supervision signal for SECL training.}
+\label{fig:sc_ptrue_norm_llama}
+\end{figure}
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=\textwidth]{figures/target_distributions.png}
+\caption{Confidence score distributions for correct (green) and
+incorrect (red) predictions on Llama~3.2-3B.
+\textbf{Top row} (target signals):
+Self-Consistency and Raw P(True) both cluster near 1.0
+with poor class separation;
+P(True) Norm spreads scores across $[0,1]$ with
+better separation between correct and incorrect predictions.
+\textbf{Bottom row} (verbalized confidence before/after SECL):
+Soft Verbalized concentrates both classes at high confidence
+(systematic overconfidence);
+after SECL training, the distribution shifts toward
+realistic confidence levels, reducing the overconfidence bias.}
+\label{fig:target_distributions}
+\end{figure}
+
+This ablation validates our design: the quality of SECL's
+calibration is determined by the quality of its training target,
+and P(True) Norm is a substantially better proxy for
+$P(\text{correct})$ than Self-Consistency.
+
+
+% ============================================================================
+\section{Comparison with DINCO}
+\label{app:dinco}
+% ============================================================================
+
+DINCO \citep{wang_calibrating_2025} is a recent inference-time calibration
+method that normalizes verbalized confidence against self-generated
+distractors and combines it with Self-Consistency.
+Unlike SECL, DINCO does not adapt the model---it computes a calibrated
+confidence score at each inference step using $\sim$10 forward passes
+(beam search + P(True) per candidate + NLI + SC sampling).
+
+\begin{table}[h]
+\centering
+\caption{SECL vs.\ DINCO on Llama~3.2-3B.
+SECL achieves better calibration (ECE) with a single inference pass,
+while DINCO provides superior discrimination (AUROC) at $\sim$10$\times$
+the inference cost.}
+\label{tab:dinco}
+\small
+\begin{tabular}{@{}lccccc@{}}
+\toprule
+\textbf{Method} & \textbf{Passes}
+  & \textbf{ECE}$\downarrow$ & \textbf{Brier}$\downarrow$
+  & \textbf{AUROC}$\uparrow$ & \textbf{Acc} \\
+\midrule
+Soft Verbalized       & 1   & .170 & .292 & .510 & .576 \\
+DINCO                 & $\sim$10 & .101 & \textbf{.207} & \textbf{.762} & .466 \\
+SECL (ours)           & 1   & \textbf{.050} & .241 & .587 & \textbf{.577} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+SECL and DINCO occupy complementary niches:
+SECL achieves the best ECE (0.050 vs.\ 0.101) with a single
+generation pass and no external models, making it suitable for
+latency-sensitive deployments.
+DINCO achieves stronger AUROC (0.762 vs.\ 0.587) by leveraging
+multiple inference passes and an NLI model, at the cost of
+$\sim$10$\times$ inference compute.
+Figure~\ref{fig:pareto} summarizes the calibration--cost trade-off
+across all methods.
+SECL occupies the Pareto-optimal position: lowest ECE at the
+lowest inference cost.
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.65\textwidth]{figures/pareto_cost_vs_ece.png}
+\caption{Calibration (ECE) vs.\ inference cost for all methods
+on Llama~3.2-3B.
+SECL achieves the lowest ECE with a single inference pass,
+dominating multi-pass methods including DINCO, Self-Consistency,
+and P(True) Norm.}
+\label{fig:pareto}
+\end{figure}
+
+Notably, DINCO's accuracy (46.6\%) is lower than SECL's (57.7\%),
+suggesting that beam search selects less accurate answers than
+greedy decoding for this model.

@@ -30,6 +30,8 @@ All runs: 500 questions/domain, 4 domains sequential (GSM8K → MMLU → ARC →
 
 SECL trains on **25.6%** of questions.
 
+Self-Consistency baseline (Llama, 10 samples, temperature=0.7): ECE=0.111, Brier=0.215, AUROC=0.718, Acc=0.624.
+
 ### 1.2 Gemma 2-2B (norm_temperature=1.5)
 
 | Method | Domain | ECE ↓ | Brier ↓ | AUROC ↑ | Acc |
@@ -82,6 +84,32 @@ SECL trains on **8.0%** of questions.
 | Gemma 2-2B | 0.256 | 0.141 | **0.056** | 6.0% |
 | Phi 3.5-Mini | 0.251 | 0.154 | **0.115** | 8.0% |
 
+### 1.5 Llama 3.1-8B (norm_temperature=3.0)
+
+| Method | ECE ↓ | Brier ↓ | AUROC ↑ | Acc |
+|---|---|---|---|---|
+| Soft Verbalized | 0.225 | 0.258 | 0.684 | 0.644 |
+| P(True) Norm | 0.120 | **0.211** | **0.718** | 0.646 |
+| **SECL (Ours)** | **0.083** | 0.222 | 0.643 | 0.646 |
+
+SECL trains on **12.6%** of questions (251/2000).
+
+### 1.6 Post-Hoc Calibration Baselines (5-fold CV, supervised)
+
+| Model | Method | ECE ↓ | AdaECE ↓ | Brier ↓ | AUROC ↑ |
+|---|---|---|---|---|---|
+| Llama | SV + Temp Scaling (T=17.6) | 0.047 | 0.075 | 0.250 | 0.504 |
+| Llama | SV + Platt Scaling | 0.021 | 0.057 | 0.244 | 0.481 |
+| Llama | PTN + Temp Scaling (T=1.8) | **0.029** | **0.030** | **0.218** | 0.692 |
+| Gemma | SV + Temp Scaling (T=11.2) | 0.047 | 0.037 | 0.249 | 0.550 |
+| Gemma | SV + Platt Scaling | 0.035 | 0.050 | 0.250 | 0.550 |
+| Gemma | PTN + Temp Scaling (T=3.0) | **0.037** | **0.033** | **0.233** | 0.647 |
+| Phi | SV + Temp Scaling (T=3.4) | **0.047** | **0.049** | 0.215 | 0.583 |
+| Phi | SV + Platt Scaling | 0.052 | 0.050 | 0.216 | 0.585 |
+| Phi | PTN + Temp Scaling (T=2.4) | 0.059 | 0.060 | **0.205** | 0.664 |
+
+Note: These are supervised methods requiring ground-truth correctness labels for fitting. SECL is unsupervised.
+
 ---
 
 ## 2. Ablations
@@ -133,7 +161,23 @@ Directional loss improves ECE and AUROC marginally under the same gating.
 
 Note: these differ in both burst size AND reset/cooldown, so this is not a clean burst-only ablation. B=50 without reset is the better configuration.
 
-### 2E: Domain Ordering — Forward vs Reversed (all 3 models)
+### 2E: KL Divergence Regularization (all 3 models, PH-gated)
+
+| Model | β | ECE ↓ | Brier ↓ | AUROC ↑ | Acc |
+|---|---|---|---|---|---|
+| Llama | **0** (default) | 0.050 | 0.241 | **0.587** | 0.577 |
+| Llama | 0.01 | **0.044** | 0.242 | 0.591 | 0.573 |
+| Llama | 0.1 | 0.149 | 0.279 | 0.527 | 0.569 |
+| Gemma | **0** (default) | **0.056** | **0.254** | **0.548** | 0.515 |
+| Gemma | 0.01 | 0.127 | 0.271 | 0.486 | 0.514 |
+| Gemma | 0.1 | 0.238 | 0.305 | 0.551 | 0.520 |
+| Phi | **0** (default) | **0.115** | **0.251** | **0.521** | 0.665 |
+| Phi | 0.01 | 0.144 | 0.252 | 0.506 | 0.669 |
+| Phi | 0.1 | 0.248 | 0.272 | 0.598 | 0.673 |
+
+β=0.01 slightly helps Llama but hurts Gemma/Phi. β=0.1 is too aggressive. Default β=0 used in all reported experiments.
+
+### 2F: Domain Ordering — Forward vs Reversed (all 3 models)
 
 Forward = GSM8K → MMLU → ARC → TruthfulQA. Reversed = TruthfulQA → ARC → MMLU → GSM8K.
 
@@ -184,7 +228,7 @@ Forward = GSM8K → MMLU → ARC → TruthfulQA. Reversed = TruthfulQA → ARC �
 
 Pattern: the first domain in the ordering gets worse ECE (warmup, no LoRA adaptation yet). Per-domain ECE wins shift with ordering, but overall ECE remains competitive in both directions.
 
-### 2F: Qwen 2.5-3B — Negative Control
+### 2G: Qwen 2.5-3B — Negative Control
 
 Qwen was tested as a candidate model but dropped because P(True) Norm was **worse** than Soft Verbalized on ECE at every temperature — the generation-discrimination gap does not exist for this model, so SECL's core assumption is violated.
 
@@ -232,7 +276,7 @@ FWD-equiv counts backward passes as 2× forward. Baseline = 2000 questions × 6 
 | Directional clip | δ | 0.15 |
 | Bin-gate threshold | — | 1 bin |
 | LoRA rank | r | 8 |
-| LoRA target | — | last 8 layers (Gemma, 18-25 of 26; Phi, 24-31 of 32), last 4 layers (Llama, 24-27 of 28) |
+| LoRA target | — | last 8 layers (Gemma 18-25 of 26, Phi 24-31 of 32), last 4 layers (Llama 24-27 of 28) |
 | Learning rate | — | 5e-5 |
 | TTT epochs per question | — | 3 |
 | Optimizer | — | AdamW |
@@ -246,3 +290,46 @@ FWD-equiv counts backward passes as 2× forward. Baseline = 2000 questions × 6 
 | Phi 3.5-Mini | 1.5 | qkv_proj | False |
 
 τ selected per model via sweep on P(True) Norm baseline (see Section 2F temperature sweep data for Gemma/Phi; Llama uses τ=0.7).
+
+---
+
+## 5. SECL + Post-Hoc Temperature Scaling
+
+SECL can be composed with supervised temperature scaling (5-fold CV):
+
+| Model | Method | ECE ↓ | AdaECE ↓ | Brier ↓ | AUROC ↑ |
+|---|---|---|---|---|---|
+| Llama | PTN + Temp* | .029 | .030 | **.218** | **.692** |
+| Llama | SECL (unsupervised) | .050 | .060 | .241 | .587 |
+| Llama | SECL + Temp* | **.049** | **.053** | .241 | .584 |
+| Gemma | PTN + Temp* | .037 | .033 | **.233** | **.647** |
+| Gemma | SECL (unsupervised) | .056 | .060 | .254 | .548 |
+| Gemma | SECL + Temp* | **.011** | **.037** | .249 | .542 |
+| Phi | PTN + Temp* | **.059** | **.060** | **.205** | **.664** |
+| Phi | SECL (unsupervised) | .115 | .119 | .251 | .521 |
+| Phi | SECL + Temp* | .097 | .082 | .232 | .516 |
+
+*Requires ground-truth labels. Gemma SECL+Temp achieves ECE=0.011, the lowest of any method.
+
+---
+
+## 6. Selective Prediction
+
+Accuracy on answered questions at various coverage levels:
+
+| Model | Method | AUC | Acc@50% | Acc@80% | Acc@100% |
+|---|---|---|---|---|---|
+| Llama | Soft Verbalized | 0.520 | 57.6% | 56.4% | 57.2% |
+| Llama | SECL (Ours) | 0.569 | 63.8% | 60.1% | 57.6% |
+| Llama | P(True) Norm | 0.633 | 70.6% | 62.8% | 57.6% |
+| Llama | Self-Consistency | 0.691 | 78.7% | 69.1% | 62.4% |
+| Gemma | Soft Verbalized | 0.500 | 54.3% | 51.9% | 51.6% |
+| Gemma | SECL (Ours) | 0.489 | 56.7% | 52.3% | 51.5% |
+| Gemma | P(True) Norm | 0.557 | 62.8% | 56.0% | 51.6% |
+| Gemma | Self-Consistency | 0.700 | 86.0% | 56.7% | 45.8% |
+| Phi | Soft Verbalized | 0.624 | 67.9% | 72.2% | 66.8% |
+| Phi | SECL (Ours) | 0.610 | 67.1% | 68.9% | 66.5% |
+| Phi | P(True) Norm | 0.696 | 79.2% | 72.6% | 66.8% |
+| Phi | Self-Consistency | 0.814 | 98.1% | 79.8% | 64.2% |
+
+SECL improves selective prediction for Llama but not consistently across models—selective prediction is a discrimination task (AUROC), and SECL primarily improves calibration (ECE).
