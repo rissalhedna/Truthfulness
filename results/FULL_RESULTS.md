@@ -72,7 +72,7 @@ SECL trains on **6.0%** of questions.
 | **SECL (Ours)** | MMLU | **0.054** | **0.223** | 0.604 | 0.644 |
 | **SECL (Ours)** | ARC | 0.129 | 0.167 | 0.499 | 0.826 |
 | **SECL (Ours)** | TruthfulQA | 0.229 | 0.319 | 0.407 | 0.532 |
-| **SECL (Ours)** | **OVERALL** | **0.115** | 0.251 | 0.521 | 0.665 |
+| **SECL (Ours)** | **OVERALL** | **0.110** | 0.251 | 0.521 | 0.665 |
 
 SECL trains on **8.0%** of questions.
 
@@ -82,7 +82,7 @@ SECL trains on **8.0%** of questions.
 |---|---|---|---|---|
 | Llama 3.2-3B | 0.170 | 0.065 | **0.050** | 25.6% |
 | Gemma 2-2B | 0.256 | 0.141 | **0.056** | 6.0% |
-| Phi 3.5-Mini | 0.251 | 0.154 | **0.115** | 8.0% |
+| Phi 3.5-Mini | 0.251 | 0.154 | **0.110** | 8.0% |
 
 ### 1.5 Llama 3.1-8B (norm_temperature=3.0)
 
@@ -171,7 +171,7 @@ Note: these differ in both burst size AND reset/cooldown, so this is not a clean
 | Gemma | **0** (default) | **0.056** | **0.254** | **0.548** | 0.515 |
 | Gemma | 0.01 | 0.127 | 0.271 | 0.486 | 0.514 |
 | Gemma | 0.1 | 0.238 | 0.305 | 0.551 | 0.520 |
-| Phi | **0** (default) | **0.115** | **0.251** | **0.521** | 0.665 |
+| Phi | **0** (default) | **0.110** | **0.251** | **0.521** | 0.665 |
 | Phi | 0.01 | 0.144 | 0.252 | 0.506 | 0.669 |
 | Phi | 0.1 | 0.248 | 0.272 | 0.598 | 0.673 |
 
@@ -223,7 +223,7 @@ Forward = GSM8K → MMLU → ARC → TruthfulQA. Reversed = TruthfulQA → ARC �
 | Reversed | ARC | **0.099** | **0.144** | **0.558** | 0.836 |
 | Forward | TruthfulQA | **0.229** | **0.319** | 0.407 | 0.532 |
 | Reversed | TruthfulQA | 0.343 | 0.359 | **0.605** | 0.548 |
-| **Forward** | **OVERALL** | **0.115** | 0.251 | 0.521 | 0.665 |
+| **Forward** | **OVERALL** | **0.110** | 0.251 | 0.521 | 0.665 |
 | **Reversed** | **OVERALL** | 0.173 | **0.250** | **0.575** | 0.674 |
 
 Pattern: the first domain in the ordering gets worse ECE (warmup, no LoRA adaptation yet). Per-domain ECE wins shift with ordering, but overall ECE remains competitive in both directions.
