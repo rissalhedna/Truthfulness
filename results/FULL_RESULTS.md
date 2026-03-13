@@ -12,11 +12,11 @@ All runs: 500 questions/domain, 4 domains sequential (GSM8K → MMLU → ARC →
 
 | Method | Domain | ECE ↓ | Brier ↓ | AUROC ↑ | Acc |
 |---|---|---|---|---|---|
-| Soft Verbalized | GSM8K | 0.218 | 0.294 | 0.565 | 0.472 |
-| Soft Verbalized | MMLU | 0.106 | 0.253 | 0.601 | 0.562 |
-| Soft Verbalized | ARC | 0.095 | 0.207 | 0.568 | 0.726 |
-| Soft Verbalized | TruthfulQA | 0.372 | 0.414 | 0.301 | 0.544 |
-| Soft Verbalized | **OVERALL** | 0.170 | 0.292 | 0.510 | 0.576 |
+| Verbalized | GSM8K | 0.218 | 0.294 | 0.565 | 0.472 |
+| Verbalized | MMLU | 0.106 | 0.253 | 0.601 | 0.562 |
+| Verbalized | ARC | 0.095 | 0.207 | 0.568 | 0.726 |
+| Verbalized | TruthfulQA | 0.372 | 0.414 | 0.301 | 0.544 |
+| Verbalized | **OVERALL** | 0.170 | 0.292 | 0.510 | 0.576 |
 | P(True) Norm | GSM8K | 0.133 | 0.264 | 0.594 | 0.476 |
 | P(True) Norm | MMLU | 0.091 | 0.239 | 0.652 | 0.566 |
 | P(True) Norm | ARC | 0.117 | 0.210 | 0.624 | 0.728 |
@@ -36,11 +36,11 @@ Self-Consistency baseline (Llama, 10 samples, temperature=0.7): ECE=0.111, Brier
 
 | Method | Domain | ECE ↓ | Brier ↓ | AUROC ↑ | Acc |
 |---|---|---|---|---|---|
-| Soft Verbalized | GSM8K | 0.549 | 0.446 | 0.658 | 0.186 |
-| Soft Verbalized | MMLU | 0.194 | 0.271 | 0.608 | 0.576 |
-| Soft Verbalized | ARC | 0.082 | 0.201 | 0.534 | 0.738 |
-| Soft Verbalized | TruthfulQA | 0.267 | 0.338 | 0.417 | 0.566 |
-| Soft Verbalized | **OVERALL** | 0.256 | 0.314 | 0.558 | 0.516 |
+| Verbalized | GSM8K | 0.549 | 0.446 | 0.658 | 0.186 |
+| Verbalized | MMLU | 0.194 | 0.271 | 0.608 | 0.576 |
+| Verbalized | ARC | 0.082 | 0.201 | 0.534 | 0.738 |
+| Verbalized | TruthfulQA | 0.267 | 0.338 | 0.417 | 0.566 |
+| Verbalized | **OVERALL** | 0.256 | 0.314 | 0.558 | 0.516 |
 | P(True) Norm | GSM8K | 0.395 | 0.326 | 0.685 | 0.186 |
 | P(True) Norm | MMLU | 0.163 | 0.263 | 0.616 | 0.576 |
 | P(True) Norm | ARC | 0.185 | 0.229 | 0.597 | 0.738 |
@@ -58,11 +58,11 @@ SECL trains on **6.0%** of questions.
 
 | Method | Domain | ECE ↓ | Brier ↓ | AUROC ↑ | Acc |
 |---|---|---|---|---|---|
-| Soft Verbalized | GSM8K | 0.290 | 0.304 | 0.563 | 0.650 |
-| Soft Verbalized | MMLU | 0.264 | 0.286 | 0.602 | 0.648 |
-| Soft Verbalized | ARC | 0.109 | 0.150 | 0.588 | 0.826 |
-| Soft Verbalized | TruthfulQA | 0.343 | 0.362 | 0.592 | 0.546 |
-| Soft Verbalized | **OVERALL** | 0.251 | 0.275 | 0.600 | 0.667 |
+| Verbalized | GSM8K | 0.290 | 0.304 | 0.563 | 0.650 |
+| Verbalized | MMLU | 0.264 | 0.286 | 0.602 | 0.648 |
+| Verbalized | ARC | 0.109 | 0.150 | 0.588 | 0.826 |
+| Verbalized | TruthfulQA | 0.343 | 0.362 | 0.592 | 0.546 |
+| Verbalized | **OVERALL** | 0.251 | 0.275 | 0.600 | 0.667 |
 | P(True) Norm | GSM8K | 0.261 | 0.303 | 0.559 | 0.650 |
 | P(True) Norm | MMLU | 0.171 | 0.243 | 0.648 | 0.648 |
 | P(True) Norm | ARC | 0.129 | 0.157 | 0.680 | 0.826 |
@@ -78,7 +78,7 @@ SECL trains on **8.0%** of questions.
 
 ### 1.4 Overall ECE Summary (main claim)
 
-| Model | Soft Verbalized | P(True) Norm | SECL (Ours) | TTT% |
+| Model | Verbalized | P(True) Norm | SECL (Ours) | TTT% |
 |---|---|---|---|---|
 | Llama 3.2-3B | 0.170 | 0.065 | **0.050** | 25.6% |
 | Gemma 2-2B | 0.256 | 0.141 | **0.056** | 6.0% |
@@ -88,9 +88,10 @@ SECL trains on **8.0%** of questions.
 
 | Method | ECE ↓ | Brier ↓ | AUROC ↑ | Acc |
 |---|---|---|---|---|
-| Soft Verbalized | 0.225 | 0.258 | 0.684 | 0.644 |
-| P(True) Norm | 0.120 | **0.211** | **0.718** | 0.646 |
-| **SECL (Ours)** | **0.083** | 0.222 | 0.643 | 0.646 |
+| Verbalized | 0.225 | 0.258 | 0.684 | 0.644 |
+| P(True) Norm | 0.120 | 0.211 | 0.718 | 0.646 |
+| DINCO | 0.117 | **0.210** | **0.756** | 0.522 |
+| **SECL (Ours)** | **0.083** | 0.222 | 0.643 | **0.646** |
 
 SECL trains on **12.6%** of questions (251/2000).
 
@@ -230,11 +231,11 @@ Pattern: the first domain in the ordering gets worse ECE (warmup, no LoRA adapta
 
 ### 2G: Qwen 2.5-3B — Negative Control
 
-Qwen was tested as a candidate model but dropped because P(True) Norm was **worse** than Soft Verbalized on ECE at every temperature — the generation-discrimination gap does not exist for this model, so SECL's core assumption is violated.
+Qwen was tested as a candidate model but dropped because P(True) Norm was **worse** than Verbalized on ECE at every temperature — the generation-discrimination gap does not exist for this model, so SECL's core assumption is violated.
 
 | Method | ECE ↓ | Brier ↓ | AUROC ↑ | Acc | N |
 |---|---|---|---|---|---|
-| Soft Verbalized | 0.247 | 0.272 | 0.565 | 0.715 | 400 |
+| Verbalized | 0.247 | 0.272 | 0.565 | 0.715 | 400 |
 | Hard Verbalized | 0.250 | 0.276 | 0.566 | 0.715 | 400 |
 | P(True) T=0.3 | 0.290 | 0.299 | 0.569 | 0.715 | 400 |
 | P(True) T=0.7 | 0.263 | 0.287 | 0.577 | 0.715 | 400 |
@@ -243,7 +244,7 @@ Qwen was tested as a candidate model but dropped because P(True) Norm was **wors
 | P(True) T=2.0 | 0.267 | 0.291 | 0.576 | 0.715 | 400 |
 | P(True) T=3.0 | 0.291 | 0.304 | 0.582 | 0.715 | 400 |
 
-Note: Qwen runs used only 100 questions/domain (400 total) due to early termination after identifying the negative result. Best P(True) ECE (0.257 at T=1.0) is still worse than Soft Verbalized (0.247).
+Note: Qwen runs used only 100 questions/domain (400 total) due to early termination after identifying the negative result. Best P(True) ECE (0.257 at T=1.0) is still worse than Verbalized (0.247).
 
 ---
 
@@ -319,15 +320,15 @@ Accuracy on answered questions at various coverage levels:
 
 | Model | Method | AUC | Acc@50% | Acc@80% | Acc@100% |
 |---|---|---|---|---|---|
-| Llama | Soft Verbalized | 0.520 | 57.6% | 56.4% | 57.2% |
+| Llama | Verbalized | 0.520 | 57.6% | 56.4% | 57.2% |
 | Llama | SECL (Ours) | 0.569 | 63.8% | 60.1% | 57.6% |
 | Llama | P(True) Norm | 0.633 | 70.6% | 62.8% | 57.6% |
 | Llama | Self-Consistency | 0.691 | 78.7% | 69.1% | 62.4% |
-| Gemma | Soft Verbalized | 0.500 | 54.3% | 51.9% | 51.6% |
+| Gemma | Verbalized | 0.500 | 54.3% | 51.9% | 51.6% |
 | Gemma | SECL (Ours) | 0.489 | 56.7% | 52.3% | 51.5% |
 | Gemma | P(True) Norm | 0.557 | 62.8% | 56.0% | 51.6% |
 | Gemma | Self-Consistency | 0.700 | 86.0% | 56.7% | 45.8% |
-| Phi | Soft Verbalized | 0.624 | 67.9% | 72.2% | 66.8% |
+| Phi | Verbalized | 0.624 | 67.9% | 72.2% | 66.8% |
 | Phi | SECL (Ours) | 0.610 | 67.1% | 68.9% | 66.5% |
 | Phi | P(True) Norm | 0.696 | 79.2% | 72.6% | 66.8% |
 | Phi | Self-Consistency | 0.814 | 98.1% | 79.8% | 64.2% |
