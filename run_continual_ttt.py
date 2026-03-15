@@ -1,17 +1,8 @@
 #!/usr/bin/env python3
 # If shit hits the fan run this: mkdir -p /tmp/cursor-server-3hedna && ln -s /tmp/cursor-server-3hedna ~/.cursor-server
 """
-Continual Test-Time Training with Discriminative Calibration (FIXED VERSION)
+Continual Test-Time Training with Discriminative Calibration
 =============================================================================
-Fixed issues:
-1. Neighbor generation uses base model (no adapter drift)
-2. Gradient accumulation safety (zero_grad on failure)
-3. Removed sparse correction (unused)
-4. Removed P(Know) binary gate (continuous scaling)
-5. Fixed memory leaks (clone + empty_cache)
-6. MCQ extraction supports all letters (A-Z)
-7. Domain boundary detection skips interleaved mode
-
 Run with: python run_continual_ttt.py --mode sequential --questions_per_domain 100
 """
 
@@ -139,22 +130,6 @@ torch.manual_seed(args.seed)
 np.random.seed(args.seed)
 random.seed(args.seed)
 
-def _dbg_log(location, message, data=None, run_id="pre-fix", hypothesis_id="H0"):
-    try:
-        payload = {
-            "id": f"log_{int(time.time()*1000)}_{random.randint(1000,9999)}",
-            "runId": run_id,
-            "hypothesisId": hypothesis_id,
-            "location": location,
-            "message": message,
-            "data": data or {},
-            "timestamp": int(time.time() * 1000),
-        }
-        with open("/ltstorage/home/3hedna/Truthfulness/.cursor/debug.log", "a", encoding="utf-8") as f:
-            f.write(json.dumps(payload, default=str) + "\n")
-    except Exception:
-        pass
-
 DEVICE = "cuda:0"
 
 # =============================================================================
@@ -238,22 +213,6 @@ if isinstance(num_hidden_layers, int) and num_hidden_layers > 0:
             f"Adjusted layer range from [{orig_start}, {orig_end}) "
             f"to [{LAYER_START}, {LAYER_END}) for model depth={num_hidden_layers}"
         )
-    # #region agent log
-    _dbg_log(
-        "run_continual_ttt.py:model_init",
-        "layer_range_resolved",
-        {
-            "requested_start": orig_start,
-            "requested_end": orig_end,
-            "resolved_start": LAYER_START,
-            "resolved_end": LAYER_END,
-            "num_hidden_layers": num_hidden_layers,
-            "model_name": MODEL_NAME,
-        },
-        run_id="pre-fix",
-        hypothesis_id="H3",
-    )
-    # #endregion
 
 print(f"Base model loaded to: {next(base_model.parameters()).device}")
 print(f"Model layers targeted: {LAYER_START}-{LAYER_END-1}")
@@ -662,18 +621,6 @@ def get_soft_confidence(generated_ids, input_len, model, tokenizer):
     conf_mask = create_confidence_mask(generated_ids[:, input_len:], tokenizer)
     conf_pos = (conf_mask[0] == 1).nonzero(as_tuple=True)[0]
     if len(conf_pos) == 0:
-        # #region agent log
-        _dbg_log(
-            "run_continual_ttt.py:get_soft_confidence",
-            "soft_confidence_missing_position",
-            {
-                "input_len": int(input_len),
-                "decoded_tail_preview": tokenizer.decode(generated_ids[0][input_len:][:60], skip_special_tokens=True),
-            },
-            run_id="pre-fix",
-            hypothesis_id="H4",
-        )
-        # #endregion
         return None
     with torch.no_grad():
         logits = model(input_ids=generated_ids, attention_mask=torch.ones_like(generated_ids)).logits
@@ -1152,20 +1099,6 @@ def train_single_question_discriminative(question, train_model, optimizer, token
                             loss = loss - F.logsigmoid(-diff)
                         n_pairs += 1
                     loss = loss / n_pairs if n_pairs > 0 else None
-                    # #region agent log
-                    _dbg_log(
-                        "run_continual_ttt.py:ranking_loss",
-                        "ranking_pairs_computed",
-                        {
-                            "n_pairs": int(n_pairs),
-                            "cur_ptrue": float(cur_ptrue),
-                            "buffer_size": len(ranking_buffer),
-                            "loss_is_none": bool(loss is None),
-                        },
-                        run_id="pre-fix",
-                        hypothesis_id="H1",
-                    )
-                    # #endregion
                 else:
                     loss = None
             elif args.use_mse_loss:
@@ -1645,24 +1578,6 @@ def run_continual_experiment():
                             param.zero_()
                 optimizer = torch.optim.AdamW(train_model.parameters(), lr=args.lr)
                 print(f"  [PH RESET] Trigger #{ph_gate.total_triggers} at step {i+1} — LoRA zeroed, optimizer reset")
-            # #region agent log
-            _dbg_log(
-                "run_continual_ttt.py:main_loop_gate",
-                "ph_gate_decision",
-                {
-                    "step": i + 1,
-                    "domain": domain,
-                    "entropy": float(entropy),
-                    "should_do_ttt": bool(should_do_ttt),
-                    "fresh_trigger": bool(ph_gate.fresh_trigger),
-                    "cooldown_remaining": int(ph_gate.cooldown_remaining),
-                    "ttt_remaining": int(ph_gate.ttt_remaining),
-                    "total_triggers": int(ph_gate.total_triggers),
-                },
-                run_id="pre-fix",
-                hypothesis_id="H5",
-            )
-            # #endregion
         
         if no_accumulation and not args.baseline_only and should_do_ttt:
             with torch.no_grad():
@@ -1858,20 +1773,6 @@ def run_continual_experiment():
                 else:
                     confidence = extract_confidence(_sr)
                 skip_response = _sr
-                # #region agent log
-                _dbg_log(
-                    "run_continual_ttt.py:skip_path",
-                    "skip_soft_readout",
-                    {
-                        "step": i + 1,
-                        "soft_conf_is_none": bool(soft_conf is None),
-                        "confidence_bin": int(confidence),
-                        "answer_preview": str(answer)[:80],
-                    },
-                    run_id="pre-fix",
-                    hypothesis_id="H2",
-                )
-                # #endregion
             else:
                 answer, confidence = baseline['answer'], baseline['confidence']
                 skip_response = baseline['response']
@@ -1880,20 +1781,6 @@ def run_continual_experiment():
             brier = (conf_prob - float(is_correct)) ** 2
             with torch.no_grad():
                 skip_p_true = get_discriminative_confidence(question, answer, skip_response, train_model, tokenizer, use_p_know=args.use_p_know, claimed_bin=confidence)
-            # #region agent log
-            _dbg_log(
-                "run_continual_ttt.py:skip_path",
-                "skip_ptrue_response_source",
-                {
-                    "step": i + 1,
-                    "used_soft_skip": bool(args.use_soft_confidence),
-                    "skip_response_matches_baseline_response": bool(skip_response == baseline.get('response', '')),
-                    "answer_preview": str(answer)[:80],
-                },
-                run_id="pre-fix",
-                hypothesis_id="H2",
-            )
-            # #endregion
             brier_p_true = (skip_p_true - float(is_correct)) ** 2
             result = {
                 'question': question[:200], 'ground_truth': ground_truth, 'domain': domain,
@@ -1943,7 +1830,7 @@ def run_continual_experiment():
             print(f"Q: {q_preview}")
             print(f"Ground Truth: {ground_truth}")
             print("-"*70)
-            mark = "✓" if is_correct else "✗"
+            mark = "OK" if is_correct else "WRONG"
             print(f"TTT: {result['ttt_answer']} (conf: {result['ttt_confidence']}) {mark}")
             if not args.baseline_only:
                 print(f"Avg P(True): {avg_p_true:.3f}")

@@ -510,7 +510,7 @@ def extract_answer(text):
             return line
 
     # Final fallback: return full text (don't truncate for debugging)
-    return text.strip()  # ✅ FIXED: Was [:100], now returns full text
+    return text.strip()
 
 confidence_extraction_stats = {'success': 0, 'fallback_no_match': 0, 'fallback_no_parse': 0}
 
@@ -838,25 +838,25 @@ def compute_correctness_rates(qa_dataset, model, tokenizer, n_samples=10,
     
     # Load existing results if file exists (resume capability)
     if os.path.exists(save_path):
-        print(f"\n✓ Found existing file: {save_path}")
+        print(f"Found existing file: {save_path}")
         print("Loading existing results to resume...")
         with open(save_path, 'r') as f:
             correctness_rates = json.load(f)
-        print(f"✓ Loaded {len(correctness_rates)} existing results")
+        print(f"Loaded {len(correctness_rates)} existing results")
         
         # Check if already complete
         if len(correctness_rates) >= min(max_questions, len(qa_dataset)):
-            print("✓ All questions already processed!")
+            print("All questions already processed!")
             return correctness_rates
         
-        print(f"→ Resuming from question {len(correctness_rates)}")
+        print(f"Resuming from question {len(correctness_rates)}")
     else:
         correctness_rates = {}
     
-    print(f"\n⏳ Computing correctness rates for {min(max_questions, len(qa_dataset))} questions...")
+    print(f"\nComputing correctness rates for {min(max_questions, len(qa_dataset))} questions...")
     print(f"Generating {n_samples} samples per question with temperature={temperature}")
     print(f"Dataset type: {dataset_type}")
-    print(f"💾 Saving incrementally every 10 questions to: {save_path}")
+    print(f"Saving incrementally every 10 questions to: {save_path}")
     
     model.eval()
     
@@ -929,7 +929,7 @@ def compute_correctness_rates(qa_dataset, model, tokenizer, n_samples=10,
             with open(save_path, 'w') as f:
                 json.dump(correctness_rates, f, indent=2)
             avg_rate = sum(r['correctness_rate'] for r in correctness_rates.values()) / len(correctness_rates)
-            print(f"\n  💾 Saved at {idx + 1}/{min(max_questions, len(qa_dataset))} | Avg correctness rate: {avg_rate:.3f}")
+            print(f"\n  Saved at {idx + 1}/{min(max_questions, len(qa_dataset))} | Avg correctness rate: {avg_rate:.3f}")
     
     torch.cuda.empty_cache()
     
@@ -938,10 +938,10 @@ def compute_correctness_rates(qa_dataset, model, tokenizer, n_samples=10,
         json.dump(correctness_rates, f, indent=2)
     
     print(f"\n{'='*60}")
-    print(f"✓ COMPLETED! Final save: {save_path}")
-    print(f"✓ Total questions processed: {len(correctness_rates)}")
+    print(f"COMPLETED. Final save: {save_path}")
+    print(f"Total questions processed: {len(correctness_rates)}")
     avg_correctness = sum(r['correctness_rate'] for r in correctness_rates.values()) / len(correctness_rates)
-    print(f"✓ Average correctness rate: {avg_correctness:.3f}")
+    print(f"Average correctness rate: {avg_correctness:.3f}")
     print(f"{'='*60}")
     
     return correctness_rates
@@ -1025,7 +1025,7 @@ def evaluate_calibration(qa_dataset, sample_results, model, tokenizer, max_eval=
 
     return results
 
-print("✅ Calibration evaluation functions defined!")
+print("Calibration evaluation functions defined.")
 
 def visualize_calibration(calib_results, title_prefix=""):
     """
@@ -1365,9 +1365,9 @@ def generate_diverse_quality_questions(model, tokenizer, num_questions=300,
             attempts += 1
             
             if len(questions_for_difficulty) % 20 == 0:
-                print(f"  ✓ Generated {len(questions_for_difficulty)}/{targets[difficulty]} {difficulty} questions")
+                print(f"  Generated {len(questions_for_difficulty)}/{targets[difficulty]} {difficulty} questions")
         
-        print(f"✅ Completed {len(questions_for_difficulty)} {difficulty} questions")
+        print(f"Completed {len(questions_for_difficulty)} {difficulty} questions")
         all_questions.extend(questions_for_difficulty)
     
     random.shuffle(all_questions)
@@ -1386,7 +1386,7 @@ def generate_diverse_quality_questions(model, tokenizer, num_questions=300,
         import json
         with open(save_path, 'w') as f:
             json.dump(all_questions, f, indent=2)
-        print(f"✓ Saved {len(all_questions)} questions to {save_path}")
+        print(f"Saved {len(all_questions)} questions to {save_path}")
     
     return all_questions
 
@@ -1422,26 +1422,26 @@ def precompute_self_consistency_rates(qa_dataset, model, tokenizer,
     
     # Load existing results if file exists (resume capability)
     if os.path.exists(save_path):
-        print(f"\n✓ Found existing file: {save_path}")
+        print(f"Found existing file: {save_path}")
         print("Loading existing results to resume...")
         with open(save_path, 'r') as f:
             self_consistency_rates = json.load(f)
-        print(f"✓ Loaded {len(self_consistency_rates)} existing results")
+        print(f"Loaded {len(self_consistency_rates)} existing results")
         
         # Check if already complete
         if len(self_consistency_rates) >= len(qa_dataset):
-            print("✓ All questions already processed!")
+            print("All questions already processed!")
             return self_consistency_rates
         
-        print(f"→ Resuming from question {len(self_consistency_rates)}")
+        print(f"Resuming from question {len(self_consistency_rates)}")
     else:
         self_consistency_rates = {}
     
-    print(f"\n⏳ Precomputing self-consistency rates for {len(qa_dataset)} questions...")
+    print(f"\nPrecomputing self-consistency rates for {len(qa_dataset)} questions...")
     print(f"Generating {n_samples} samples per question with temperature=1.0")
-    print(f"💾 Saving incrementally every 10 questions to: {save_path}")
+    print(f"Saving incrementally every 10 questions to: {save_path}")
     if debug_freq > 0:
-        print(f"🔍 Debug output enabled: showing details every {debug_freq} questions")
+        print(f"Debug output enabled: showing details every {debug_freq} questions")
     
     model.eval()
     
@@ -1497,10 +1497,10 @@ def precompute_self_consistency_rates(qa_dataset, model, tokenizer,
         # Debug output
         if debug_freq > 0 and (idx + 1) % debug_freq == 0:
             print(f"\n{'='*80}")
-            print(f"🔍 DEBUG - Question {idx + 1}/{len(qa_dataset)}")
+            print(f"DEBUG - Question {idx + 1}/{len(qa_dataset)}")
             print(f"{'='*80}")
-            print(f"❓ Question: {question[:200]}..." if len(question) > 200 else f"❓ Question: {question}")
-            print(f"\n📊 Sampled {len(sampled_answers)} answers:")
+            print(f"Question: {question[:200]}..." if len(question) > 200 else f"Question: {question}")
+            print(f"\nSampled {len(sampled_answers)} answers:")
             # Show first 5 unique answers
             unique_answers = list(set(sampled_answers))[:5]
             for i, ans in enumerate(unique_answers, 1):
@@ -1509,7 +1509,7 @@ def precompute_self_consistency_rates(qa_dataset, model, tokenizer,
                 print(f"  {i}. [{count}/{n_samples}] {ans_preview}")
             if len(unique_answers) < len(set(sampled_answers)):
                 print(f"  ... and {len(set(sampled_answers)) - len(unique_answers)} more unique answers")
-            print(f"\n✅ Self-consistency rate: {consistency_rate:.3f}")
+            print(f"\nSelf-consistency rate: {consistency_rate:.3f}")
             print(f"{'='*80}\n")
         
         # Save incrementally every 10 questions
@@ -1517,7 +1517,7 @@ def precompute_self_consistency_rates(qa_dataset, model, tokenizer,
             with open(save_path, 'w') as f:
                 json.dump(self_consistency_rates, f, indent=2)
             avg_rate = sum(self_consistency_rates.values()) / len(self_consistency_rates)
-            print(f"\n  💾 Saved at {idx + 1}/{len(qa_dataset)} | Avg consistency rate: {avg_rate:.3f}")
+            print(f"\n  Saved at {idx + 1}/{len(qa_dataset)} | Avg consistency rate: {avg_rate:.3f}")
     
     torch.cuda.empty_cache()
     
@@ -1526,10 +1526,10 @@ def precompute_self_consistency_rates(qa_dataset, model, tokenizer,
         json.dump(self_consistency_rates, f, indent=2)
     
     print(f"\n{'='*60}")
-    print(f"✓ COMPLETED! Final save: {save_path}")
-    print(f"✓ Total questions processed: {len(self_consistency_rates)}")
+    print(f"COMPLETED. Final save: {save_path}")
+    print(f"Total questions processed: {len(self_consistency_rates)}")
     avg_consistency = sum(self_consistency_rates.values()) / len(self_consistency_rates)
-    print(f"✓ Average self-consistency rate: {avg_consistency:.3f}")
+    print(f"Average self-consistency rate: {avg_consistency:.3f}")
     print(f"{'='*60}")
     
     return self_consistency_rates
