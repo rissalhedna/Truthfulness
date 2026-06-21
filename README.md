@@ -13,7 +13,7 @@
 > **SECL** is the first **test-time training** method for **LLM confidence calibration**. It exploits the *generation–discrimination gap* as label-free self-supervision: a lightweight LoRA adapter is trained online so that a model's verbalized confidence tracks its better-calibrated normalized **P(True)** signal — **no labels, no human supervision**.
 
 <p align="center">
-  <img src="figures/Final.png" alt="Overview of SECL" width="95%">
+  
 </p>
 <p align="center">
   <em><b>Overview of SECL.</b> (a) Test-time inference: an entropy-based change detector monitors the input stream; if no shift is detected, the adapted model is used directly, otherwise a calibration burst updates it. (b) Calibration burst: the frozen model generates an answer with confidence and distractors, computes NormP(True), and applies a bounded LoRA update only when the two signals disagree by more than one bin. Weights accumulate across questions.</em>
