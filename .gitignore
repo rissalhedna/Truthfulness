@@ -13,8 +13,18 @@
 !/results/appendix.tex
 !/results/main.tex
 !/results/FULL_RESULTS.md
+!/results/26_emnlp_selfcalibrating.bib
 
 # --- 3. Essential Project Files (Highly Recommended to keep) ---
 !requirements.txt
 !.gitignore
 !README.md
+!LICENSE
+!CITATION.cff
+
+# --- 4. Figures embedded in the README (so they render on GitHub) ---
+!/figures/
+/figures/*
+!/figures/Final.png
+!/figures/pareto_cost_vs_ece.png
+!/figures/5_secl_vs_verb_llama.png

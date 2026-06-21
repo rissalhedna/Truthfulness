@@ -1,0 +1,52 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite the paper below."
+title: "SECL: Self-Calibrating Language Models via Test-Time Discriminative Distillation"
+abstract: >-
+  SECL is a test-time training (TTT) pipeline that calibrates large language
+  models without labels, distilling the better-calibrated normalized P(True)
+  discriminative signal into verbalized confidence via lightweight LoRA updates
+  gated by Page-Hinkley entropy change detection.
+authors:
+  - family-names: "Hedna"
+    given-names: "Mohamed Rissal"
+    affiliation: "University of Hamburg"
+  - family-names: "Strich"
+    given-names: "Jan"
+    affiliation: "University of Hamburg"
+  - family-names: "Semmann"
+    given-names: "Martin"
+    affiliation: "University of Hamburg"
+  - family-names: "Biemann"
+    given-names: "Chris"
+    affiliation: "University of Hamburg"
+license: MIT
+date-released: 2026-01-01
+keywords:
+  - large language models
+  - calibration
+  - test-time training
+  - uncertainty estimation
+  - confidence elicitation
+identifiers:
+  - type: other
+    value: "arXiv:2604.09624"
+    description: "arXiv preprint"
+preferred-citation:
+  type: article
+  title: "Self-Calibrating Language Models via Test-Time Discriminative Distillation"
+  authors:
+    - family-names: "Hedna"
+      given-names: "Mohamed Rissal"
+      affiliation: "University of Hamburg"
+    - family-names: "Strich"
+      given-names: "Jan"
+      affiliation: "University of Hamburg"
+    - family-names: "Semmann"
+      given-names: "Martin"
+      affiliation: "University of Hamburg"
+    - family-names: "Biemann"
+      given-names: "Chris"
+      affiliation: "University of Hamburg"
+  year: 2026
+  notes: "Under review at EMNLP 2026"
+  url: "https://arxiv.org/abs/2604.09624"
