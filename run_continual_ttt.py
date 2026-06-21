@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
-# If shit hits the fan run this: mkdir -p /tmp/cursor-server-3hedna && ln -s /tmp/cursor-server-3hedna ~/.cursor-server
 """
-Continual Test-Time Training with Discriminative Calibration
-=============================================================================
-Run with: python run_continual_ttt.py --mode sequential --questions_per_domain 100
+Continual Test-Time Training with Discriminative Calibration (SECL).
+
+Adapts LLM confidence via lightweight LoRA updates using the
+generation-discrimination gap as label-free self-supervision.
+
+Usage:
+    python run_continual_ttt.py --mode sequential --questions_per_domain 500
 """
 
 import os
@@ -114,9 +117,6 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 from peft import LoraConfig, get_peft_model, TaskType
 import wandb
 from sklearn.metrics import roc_auc_score
-import warnings
-warnings.filterwarnings('ignore')
-
 from utils import (
     create_qa_prompt as _create_qa_prompt,
     extract_answer,
@@ -1057,14 +1057,12 @@ def train_single_question_discriminative(question, train_model, optimizer, token
                             pad_token_id=tokenizer.eos_token_id
                         )
                 
-                # FIXED: Clone to detach from computation graph
                 response_tokens = outputs[:, inputs['input_ids'].shape[1]:].clone()
                 conf_mask = create_confidence_mask(response_tokens, tokenizer)
                 
                 if conf_mask.sum() > 0:
                     break
                 
-                # FIXED: Clean up failed attempt
                 del outputs, response_tokens, conf_mask
                 torch.cuda.empty_cache()
                 outputs = None
@@ -1169,7 +1167,6 @@ def train_single_question_discriminative(question, train_model, optimizer, token
             
             del outputs
         
-        # FIXED: Added gradient cleanup safety
         if valid_samples > 0:
             for param in train_model.parameters():
                 if param.grad is not None:
@@ -1888,7 +1885,7 @@ def run_continual_experiment():
                 log_dict["gate/cooldown_remaining"] = ph_gate.cooldown_remaining
             wandb.log(log_dict, step=n)
         
-        # FIXED: Skip domain summaries in interleaved mode to avoid spam
+        # Skip domain summaries in interleaved mode
         next_domain = questions[i + 1]['domain'] if i + 1 < len(questions) else None
         if next_domain != domain and args.mode != 'interleaved':
             domain_results_so_far = [r for r in results if r.get('domain') == domain]

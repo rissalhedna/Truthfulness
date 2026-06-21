@@ -1,71 +1,26 @@
 \documentclass[11pt]{article}
 
-% Change "review" to "final" to generate the final (sometimes called camera-ready) version.
-% Change to "preprint" to generate a non-anonymous version with page numbers.
 \usepackage[review]{acl}
-
-% Standard package includes
 \usepackage{times}
 \usepackage{latexsym}
-
-% For proper rendering and hyphenation of words containing Latin characters (including in bib files)
 \usepackage[T1]{fontenc}
-% For Vietnamese characters
-% \usepackage[T5]{fontenc}
-% See https://www.latex-project.org/help/documentation/encguide.pdf for other character sets
-
-% This assumes your files are encoded as UTF8
 \usepackage[utf8]{inputenc}
-
-% This is not strictly necessary, and may be commented out,
-% but it will improve the layout of the manuscript,
-% and will typically save some space.
 \usepackage{microtype}
-
-% This is also not strictly necessary, and may be commented out.
-% However, it will improve the aesthetics of text in
-% the typewriter font.
 \usepackage{inconsolata}
-
-%Including images in your LaTeX document requires adding
-%additional package(s)
 \usepackage{graphicx}
-
 \usepackage{booktabs}
 \usepackage{multirow}
 \usepackage{amsmath}
+\usepackage{float}
 \usepackage{amssymb}
 \usepackage{tcolorbox}
 \usepackage{listings}
-\usepackage{blindtext}
 \usepackage{cleveref}
 \usepackage{xcolor}
 \usepackage[ruled]{algorithm}
 \usepackage[noEnd,indLines,rightComments,commentColor=gray]{algpseudocodex}
 
-% If the title and author information does not fit in the area allocated, uncomment the following
-%
-%\setlength\titlebox{<dim>}
-%
-% and set <dim> to something 5cm or larger.
-
-\title{Self-Calibrating Language Models}
-
-% Author information can be set in various styles:
-% For several authors from the same institution:
-% \author{Author 1 \and ... \and Author n \\
-%         Address line \\ ... \\ Address line}
-% if the names do not fit well on one line use
-%         Author 1 \\ {\bf Author 2} \\ ... \\ {\bf Author n} \\
-% For authors from different institutions:
-% \author{Author 1 \\ Address line \\  ... \\ Address line
-%         \And  ... \And
-%         Author n \\ Address line \\ ... \\ Address line}
-% To start a separate ``row'' of authors use \AND, as in
-% \author{Author 1 \\ Address line \\  ... \\ Address line
-%         \AND
-%         Author 2 \\ Address line \\ ... \\ Address line \And
-%         Author 3 \\ Address line \\ ... \\ Address line}
+\title{Self-Calibrating Language Models via Test-Time Discriminative Distillation}
 
 \author{First Author \\
   Affiliation / Address line 1 \\
@@ -78,45 +33,6 @@
   Affiliation / Address line 3 \\
   \texttt{email@domain} \\}
 
-%\author{
-%  \textbf{First Author\textsuperscript{1}},
-%  \textbf{Second Author\textsuperscript{1,2}},
-%  \textbf{Third T. Author\textsuperscript{1}},
-%  \textbf{Fourth Author\textsuperscript{1}},
-%\\
-%  \textbf{Fifth Author\textsuperscript{1,2}},
-%  \textbf{Sixth Author\textsuperscript{1}},
-%  \textbf{Seventh Author\textsuperscript{1}},
-%  \textbf{Eighth Author \textsuperscript{1,2,3,4}},
-%\\
-%  \textbf{Ninth Author\textsuperscript{1}},
-%  \textbf{Tenth Author\textsuperscript{1}},
-%  \textbf{Eleventh E. Author\textsuperscript{1,2,3,4,5}},
-%  \textbf{Twelfth Author\textsuperscript{1}},
-%\\
-%  \textbf{Thirteenth Author\textsuperscript{3}},
-%  \textbf{Fourteenth F. Author\textsuperscript{2,4}},
-%  \textbf{Fifteenth Author\textsuperscript{1}},
-%  \textbf{Sixteenth Author\textsuperscript{1}},
-%\\
-%  \textbf{Seventeenth S. Author\textsuperscript{4,5}},
-%  \textbf{Eighteenth Author\textsuperscript{3,4}},
-%  \textbf{Nineteenth N. Author\textsuperscript{2,5}},
-%  \textbf{Twentieth Author\textsuperscript{1}} 
-%\\
-%\\
-%  \textsuperscript{1}Affiliation 1,
-%  \textsuperscript{2}Affiliation 2,
-%  \textsuperscript{3}Affiliation 3,
-%  \textsuperscript{4}Affiliation 4,
-%  \textsuperscript{5}Affiliation 5
-%\\
-%  \small{
-%    \textbf{Correspondence:} \href{mailto:email@domain}{email@domain}
-%  }
-%}
-\usepackage[colorinlistoftodos]{todonotes}
-
 
 \begin{document}
 \maketitle
@@ -127,16 +43,14 @@ Large language models (LLMs) are systematically overconfident: they routinely ex
 Existing calibration methods either require labeled validation data, degrade under distribution shifts, or incur substantial inference costs.
 Recent work has shown that LLMs already contain a better-calibrated signal than the one they verbalize: the token probability of "True" when the model is asked "Is this answer correct?" ($P(\text{True})$) consistently outperforms their stated confidence, a gap that is theoretically grounded as generative error is lower-bounded by roughly twice the corresponding discriminative error.
 We introduce \textbf{SECL} (\textbf{SE}lf-\textbf{C}alibrating \textbf{L}anguage Models), a test-time training (TTT) pipeline that exploits this gap as label-free self-supervision, requiring no labeled data or human supervision. SECL adapts only when the input distribution shifts, training on just 6--26\% of the question stream at lower cost than the baseline it distills from.
-Across four small language models from three model families and four diverse domains, SECL reduces Expected Calibration Error (ECE) by 56--78\%, outperforming both its own supervision signal and recent inference-time methods.
+Across four small language models from three model families and four diverse domains, SECL reduces Expected Calibration Error (ECE) by 56--78\%, outperforming its own supervision signal and matching or outperforming recent inference-time methods.
 SECL is the first method to apply TTT to calibration; seven ablations covering signal quality, gating strategy, weight accumulation, loss design, domain ordering, hyperparameter sensitivity, and layer selection confirm that each component is crucial and robust across configurations.
+Anonymized Code: \href{https://anonymous.4open.science/r/secl-emnlp26-submission-C890}{anonymous.4open.science/submission-C890}
 \end{abstract}
-
 
 \section{Introduction} \label{sec:introduction}
 
-
-
-LLMs are systematically overconfident \cite{jiang_how_2021, xiong_can_2024}, and alignment procedures such as Reinforcement Learning from Human Feedback \citep[RLHF;][]{bai_training_2022} worsen this by rewarding agreement with human preferences over truthfulness \cite{sharma_understanding_2024}. The consequences are practical: in healthcare, where LLMs increasingly support triage and diagnostics \cite{liu_application_2025}, a review of 519 studies found that only 1.2\% measured calibration despite 95.4\% measuring accuracy \cite{bedi_testing_2025}. A model reporting 90\% certainty on questions it answers correctly only 60\% of the time erodes clinician trust and risks patient harm. Addressing this problem needs calibration methods that work without labels and can adapt to new domains at test time.
+LLMs are systematically overconfident \cite{jiang_how_2021, xiong_can_2024}, and alignment procedures such as Reinforcement Learning from Human Feedback \citep[RLHF;][]{bai_training_2022} worsen this by rewarding agreement with human preferences over truthfulness \cite{sharma_understanding_2024}. The consequences are practical: in healthcare, where LLMs increasingly support triage and diagnostics \cite{liu_application_2025}, a review of 519 studies found that only 1.2\% measured calibration despite 95.4\% measuring accuracy \cite{bedi_testing_2025}. A model reporting 90\% certainty on questions it answers correctly only 30\% of the time erodes clinician trust and risks patient harm. Addressing this problem needs calibration methods that work without labels and can adapt to new domains at test time.
 
 \begin{figure}[!t]
     \centering
@@ -144,9 +58,6 @@ LLMs are systematically overconfident \cite{jiang_how_2021, xiong_can_2024}, and
     \caption{Calibration error vs.\ inference cost for Llama~3.2-3B (lower-left is better). Each point is a calibration method; the $x$-axis measures cost in forward-pass equivalents per question, and the $y$-axis measures Expected Calibration Error (ECE). SECL achieves the lowest calibration error at a fraction of the cost of existing methods.}
     \label{fig:pareto_main}
 \end{figure}
-
-
-
 
 \begin{figure*}[!th]
   \centering
@@ -159,24 +70,17 @@ LLMs are systematically overconfident \cite{jiang_how_2021, xiong_can_2024}, and
 
 Yet LLMs already contain a better-calibrated signal than the one they verbalize. When asked whether their own answer to a question is correct, LLMs produce probability estimates ($P(\text{True})$) that are substantially better calibrated than the confidence they express during generation \cite{kadavath_language_2022, tian_just_2023}. 
 This exposes a systematic gap between \emph{discrimination} and \emph{generation}, with theoretical backing: \citet{kalai_why_2025} shows that a model’s generative error is lower-bounded by roughly twice its discriminative error. Intuitively, a model that cannot reliably produce the correct answer can still often recognize when a given answer, or its own, is wrong. This gap provides a continual source of self-supervision that needs no labeled data.
+Prior work documents this phenomenon in LLMs; our experiments test whether the same mechanism can be exploited effectively in small language models.
 
-
-Prior work on calibration falls into three broad categories, each with a key limitation that SECL addresses (see Section~\ref{sec:related-work} for more details). Sampling-based methods \cite{manakul_selfcheckgpt_2023, kuhn_semantic_2023} measure consistency across multiple generations but are expensive and fail on consistent hallucinations. SECL avoids repeated sampling entirely. Static probing methods \cite{du_haloscope_2024, liu_litcab_2024} analyze internal representations but degrade under distribution shift. SECL adapts continuously via test-time training. Training-based approaches \cite{lin_teaching_2022, stangel_rewarding_2025, damani_binary_2025} can improve calibration within a domain but depend on human labels or fail to generalize to out-of-distribution (OOD) settings. 
-%For example, \citet{damani_binary_2025} found that standard RL degrades calibration OOD, directly motivating a test-time approach. 
-%Most recently, \citet{wang_calibrating_2025} showed that normalizing verbalized confidence across self-generated distractors yields strong training-free calibration, but this still only \emph{reads} the model's output signal without changing its weights, leaving it unable to adapt as the input distribution shifts.
-
-%Test-time training (TTT) addresses the OOD limitation by adapting model weights based on incoming test data rather than relying on a fixed training distribution. TTT originated in computer vision \cite{sun_testtime_2020, wang_tent_2021, wang_continual_2022} and has recently been extended to LLMs for accuracy improvement \cite{hardt_testtime_2024, hu_testtime_2025, sun_learning_2025, zweiger_selfadapting_2025}, but has not been applied to calibration. Two obstacles explain why. 
+Prior work on calibration falls into three broad categories, each with a key limitation that SECL addresses (see Section~\ref{sec:related-work} for more details). Sampling-based methods \cite{manakul_selfcheckgpt_2023, kuhn_semantic_2023} measure consistency across multiple generations but are expensive and fail on consistent hallucinations. SECL avoids repeated sampling entirely. Static probing methods \cite{du_haloscope_2024, liu_litcab_2024} analyze internal representations but degrade under distribution shift. SECL adapts continuously via test-time training. Training-based approaches \cite{lin_teaching_2022, stangel_rewarding_2025, damani_binary_2025} can improve calibration within a domain, but many either require supervised labels or degrade OOD under standard Reinforcement Learning (RL) training.
 Test-time training (TTT), which adapts model weights to incoming test data instead of relying on a fixed training distribution, originated in computer vision \cite{sun_testtime_2020, wang_tent_2021, wang_continual_2022} and has recently been extended to LLMs for accuracy improvement \cite{hardt_testtime_2024, hu_testtime_2025, sun_learning_2025, zweiger_selfadapting_2025}, but has not yet been applied to calibration due to two obstacles.
-First, TTT requires a self-supervision signal at test time; existing calibration signals (sampling-based consistency or discriminative probes) are expensive to compute on every question, making continuous adaptation costly. Second, naive weight updates risk catastrophic forgetting or overfitting to noisy targets, especially when the supervision signal itself is imperfect. %Together, these issues have made TTT impractical for calibration despite its natural fit for distribution-shift robustness.
+First, TTT requires a self-supervision signal at test time; existing calibration signals (sampling-based consistency or discriminative probes) are expensive to compute on every question, making continuous adaptation costly. Second, naive weight updates risk catastrophic forgetting or overfitting to noisy targets, especially when the supervision signal itself is imperfect.
 
-We show that both obstacles can be overcome. \textbf{SECL} (\textbf{SE}lf-\textbf{C}alibrating \textbf{L}anguage Models) uses the generation--discrimination gap as a naturally available scalar target: a normalized $P(\text{True})$ signal computed from the frozen base model serves as self-supervision to adjust verbalized confidence via lightweight Low-Rank Adaptation \citep[LoRA;][]{hu_lora_2022} updates, requiring no labeled data or human supervision (Figure ~\ref{fig:pareto_main}). Entropy-based gating triggers adaptation only on distribution shifts, and a conservative directional loss with bounded updates mitigates catastrophic forgetting.
-
-Our contributions are as follows:
+We show that both obstacles can be overcome. SECL uses the generation--discrimination gap as a naturally available scalar target: a normalized $P(\text{True})$ signal computed from the frozen base model serves as self-supervision to adjust verbalized confidence via lightweight Low-Rank Adaptation \citep[LoRA;][]{hu_lora_2022} updates, requiring no labeled data or human supervision (Figure~\ref{fig:pareto_main}). Entropy-based gating triggers adaptation only on distribution shifts, and a conservative directional loss with bounded updates mitigates catastrophic forgetting.
+\\Our contributions are as follows:
 \begin{itemize}
     \item We introduce the first \textbf{TTT method for calibration}, using the generation--discrimination gap as label-free self-supervision. Entropy-based gating limits adaptation to distribution shifts, so SECL trains only on \textbf{6--26\% of the data} at a lower cost than the signal it distills.
-  %  \item We show that the adapted model \textbf{surpasses} its own supervision signal and matches supervised post-hoc calibration without any labels, across four models from three families and four domains. This demonstrates that SECL does not merely copy the discriminative signal but generalizes beyond the training questions.
-    \item The adapted model \textbf{surpasses} its supervised counterpart and \textbf{matches supervised calibration without labels}, showing that SECL generalizes beyond the training signal.
-    %\item We provide seven ablations that isolate each design decision, showing that signal quality determines the calibration ceiling and that each component is individually necessary. SECL is robust across four model architectures, forward and reversed domain orderings, and all tested hyperparameter ranges.
+    \item The adapted model \textbf{surpasses} its self-supervision signal and \textbf{matches supervised calibration without labels}, showing that SECL generalizes beyond the training signal.
     \item We provide \textbf{seven ablations} that isolate each design choice, showing that signal quality sets the calibration ceiling and that \textbf{each component is necessary.} SECL is robust across four architectures, forward and reversed domain orderings, and all tested hyperparameters.
 \end{itemize}
 
@@ -199,10 +103,10 @@ A fundamental limitation of training-based approaches is the difficulty of speci
 \citet{kadavath_language_2022} established that LLMs' discriminative judgments $P(\text{True})$ are well-calibrated and improve with scale.
 \citet{tian_just_2023} extended this to RLHF-tuned models, showing that verbalized confidence is typically better calibrated than conditional token probabilities, even though RLHF degrades the latter.
 Building on this line of work, \citet{kalai_why_2025} provided a theoretical basis: generative error is lower-bounded by approximately twice the misclassification rate of the corresponding binary validity problem.
-\citet{wang_calibrating_2025} exploit this gap directly: their DINCO method normalizes verbalized confidence across natural language inference (NLI)-reweighted distractors and integrates self-consistency, outperforming prior baselines. However, DINCO is a static inference-time technique that cannot adapt when the discriminative signal itself degrades on novel task types \cite{kadavath_language_2022} or when truthfulness representations rely on superficial features \cite{haller_llm_2025}. SECL addresses this by distilling the discriminative signal into the model's weights, enabling continuous adaptation. We provide a direct empirical comparison in Section~\ref{subsec:main_results} and Appendix~\ref{app:dinco}.
+\citet{wang_calibrating_2025} exploit this gap directly: their DINCO method normalizes verbalized confidence across natural language inference (NLI)-reweighted distractors and integrates self-consistency, outperforming prior baselines. However, DINCO is a static inference-time technique that cannot adapt when the underlying truthfulness signal is brittle under distribution shift \cite{haller_llm_2025}. SECL addresses this by distilling the discriminative signal into the model's weights, enabling continuous adaptation. We provide a direct empirical comparison in Section~\ref{subsec:main_results} and Appendix~\ref{app:dinco}.
 
 \paragraph{Test-Time Adaptation for LLMs.}
-Test-time training (TTT) adapts model weights using unsupervised signals from incoming test data, originating in computer vision \cite{sun_testtime_2020, wang_tent_2021, wang_continual_2022} and recently extended to LLMs for accuracy improvement \cite{hardt_testtime_2024, hu_testtime_2025, sun_learning_2025, zweiger_selfadapting_2025}. \citet{snell_scaling_2025} showed that adaptive test-time compute allocation can outperform much larger models, and \citet{huang_efficient_2025} use calibrated confidence to allocate such compute, but their goal is accuracy, not calibration. SECL is the first method to apply test-time training to improve \emph{calibration} across domains, leveraging a supervision signal that is naturally available without any task-specific design.
+Test-time training (TTT) adapts model weights using unsupervised signals from incoming test data, originating in computer vision \cite{sun_testtime_2020, wang_tent_2021, wang_continual_2022} and recently extended to LLMs for accuracy improvement \cite{hardt_testtime_2024, hu_testtime_2025, sun_learning_2025, zweiger_selfadapting_2025}. \citet{snell_scaling_2025} showed that adaptive test-time compute allocation can outperform much larger models, and \citet{huang_efficient_2025} use calibrated confidence to allocate such compute, but their goal is accuracy, not calibration. SECL is the first method to apply test-time training to improve \emph{calibration} across domains, leveraging a naturally available supervision signal without any task-specific design.
 
 \section{Methods} \label{sec:methods}
 The core idea is simple: when the model encounters a new type of question, it checks whether its stated confidence matches its own self-assessment. If the model claims 90\% confidence but its True/False self-check suggests only 30\%, a small weight update corrects this mismatch. Over time, these corrections accumulate, producing better-calibrated confidence.
@@ -222,9 +126,7 @@ We track the entropy $H_t$ of the model's output token distribution with an expo
     m_t = \sum_{s=1}^{t} \big(H_s - \bar{H}_t - \epsilon\big),
 \end{equation}
 where $\bar{H}_t$ is the running mean entropy, $H_s$ the entropy at step $s$, and $\epsilon$ is a tolerance that suppresses false alarms from minor fluctuations. An alarm fires when $m_t - \min_{s \leq t} m_s > \lambda$; a higher $\lambda$ requires a larger cumulative entropy deviation before triggering, controlling the trade-off between responsiveness and false alarm rate (sensitivity analysis in Section~\ref{sec:ablation_studies}). Upon detection, cumulative statistics are reset, and a calibration burst of $B$ consecutive questions is initiated. 
-%Processing multiple questions per burst is essential because a single LoRA update provides insufficient signal for stable adaptation; the burst amortizes the cost of switching into calibration mode and allows corrections to accumulate across diverse questions from the new distribution.
 Processing multiple questions per burst is crucial: a single LoRA update provides too little signal for stable adaptation, whereas a burst amortizes the cost of entering calibration mode and allows corrections to accumulate across diverse questions from the new distribution.
-
 
 LoRA weights accumulate across domains without resetting. When a new distribution shift is detected, the subsequent calibration burst adapts the existing accumulated weights rather than starting from scratch, allowing calibration knowledge from earlier domains to compound. Datasets and domain ordering are described in Section~\ref{subsec:setup}, with ordering sensitivity analyzed in Section~\ref{sec:ablation_studies}.
 
@@ -240,14 +142,13 @@ Following \citet{lin_teaching_2022} and \citet{tian_just_2023}, we elicit verbal
 %
 where $P(\text{bin}_k)$ is the model's output probability for digit token $k$. This soft readout preserves information from the full distribution and provides a differentiable signal for the mean squared error (MSE) loss in Section~\ref{subsec:ttc}.
 
-Raw $P_{\text{True}}$ suffers from suggestibility bias, the model tends to affirm any answer presented to it, inflating $P_{\text{True}}$ regardless of correctness \cite{wang_calibrating_2025}, and degrades under distribution shift \cite{haller_llm_2025}. We address both by normalizing $P_{\text{True}}$ across distractor answers. For multiple-choice questions, we use the given answer options as distractors. For open-ended questions, we prompt the model to generate $K \in \{2, 3, 4\}$ plausible alternatives. The normalized signal is:
+Raw $P_{\text{True}}$ suffers from suggestibility bias, the model tends to affirm any answer presented to it, inflating $P_{\text{True}}$ regardless of correctness \cite{wang_calibrating_2025}, and degrades under distribution shift \cite{haller_llm_2025}. We address both by normalizing $P_{\text{True}}$ across distractor answers. For multiple-choice questions, we use the given answer options as distractors. For open-ended questions, we generate $K{=}4$ plausible alternatives. The normalized signal is:
 %
 \begin{equation} \label{eq:normp}
     \text{NormP}_{\text{True}}(a) = \frac{e_a}{e_a + \sum_{k=1}^{K} e_{d_k}},
 \end{equation}
 %
-%where $e_x = \exp\!\big(P_{\text{True}}(x) / \tau\big)$ and $\tau$ is a model-dependent temperature (values in Section~\ref{subsec:setup}; selection rationale in Section~\ref{sec:ablation_studies}). 
-where $e_x = \exp\!\big(P_{\text{True}}(x) / \tau\big)$, with $\tau$ as a model-specific temperature (see Section~\ref{subsec:setup}); the choice of $\tau$ are discussed in Section~\ref{sec:ablation_studies}.
+where $e_x = \exp\!\big(P_{\text{True}}(x) / \tau\big)$, with $\tau$ as a model-specific temperature (see Section~\ref{subsec:setup}); the choice of $\tau$ is discussed in Section~\ref{sec:ablation_studies}.
 This softmax over distractors converts the raw signal into a \emph{relative} confidence that accounts for baseline suggestibility.
 
 Unlike DINCO, we use a simple softmax over distractors without NLI reweighting or self-consistency. The resulting $\text{NormP}_{\text{True}}$ provides a continuous training target, which is discretized into the same 10 equal-width bins used for verbalized confidence (Eq.~\ref{eq:soft_conf}), ensuring a common scale between supervision target and model output.
@@ -273,13 +174,13 @@ The training loss is mean squared error between verbalized confidence and the di
     \mathcal{L}_i = \big(c_i - \hat{c}_i\big)^2.
 \end{equation}
 We optimize with AdamW \cite{loshchilov_decoupled_2019}; learning rate and epoch count are reported in Section~\ref{subsec:setup}.
-Crucially, $\text{NormP}_{\text{True}}$ is always computed from the \emph{base model without LoRA adapters}, ensuring the supervision signal is not corrupted by ongoing adaptation.
+Crucially, $\text{NormP}_{\text{True}}$ is  computed from the \emph{base model without LoRA adapters}, ensuring the supervision signal is not corrupted by ongoing adaptation.
 
 \paragraph{Bin-gate filter.}
 Not every question requires calibration.
 We skip training when the model is already approximately calibrated: specifically, when $|\text{bin}(c_i) - \text{bin}(c_i^*)| \leq 1$.
 This avoids gradient updates on questions where verbalized and discriminative confidence already agree, reducing computation and limiting noise from marginal disagreements.
-We use threshold~1 as the default; the effect on training fraction and ECE is quantified in Section~\ref{sec:ablation_studies}.
+We use threshold~1 as default; the effect on training fraction and ECE is shown in Section~\ref{sec:ablation_studies}.
 
 \section{Experiments} \label{sec:experiments}
 
@@ -295,7 +196,7 @@ We use threshold~1 as the default; the effect on training fraction and ECE is qu
   \begin{minipage}[t]{0.48\textwidth}
       \centering
       \includegraphics[width=\textwidth]{figures/5_secl_vs_verb_llama.pdf}
-      \caption{SECL reliability diagrams for Llama~3.2-3B. \textbf{Left:}~Verbalized baseline (ECE\,=\,0.170). \textbf{Right:}~After SECL adaptation, confidence aligns with accuracy (ECE\,=\,0.050, 71\,\% reduction), \emph{surpassing} its own training signal (Figure~\ref{fig:gap}).}
+      \caption{Reliability diagrams for Llama~3.2-3B. \textbf{Left:}~Verbalized baseline (ECE\,=\,0.170). \textbf{Right:}~After SECL (ECE\,=\,0.050, 71\,\% reduction), surpassing its own training signal (Figure~\ref{fig:gap}). The empty top bin shows that SECL eliminates the baseline's false near-100\% certainty.}
       \label{fig:reliability}
   \end{minipage}
 \end{figure*}
@@ -311,7 +212,7 @@ and \textbf{TruthfulQA} \cite{lin_truthfulqa_2021}, adversarially constructed mi
 These four domains differ in reasoning type, difficulty, and degree of model overconfidence.
 
 \paragraph{Continual protocol.}
-The four domains are presented sequentially (GSM8K $\to$ MMLU $\to$ ARC $\to$ TruthfulQA), forming a single stream of 2{,}000 questions with distribution shifts between domains. Per-domain results are in Appendix~\ref{app:domain_order}; sensitivity to domain ordering is examined in Section~\ref{sec:ablation_studies}.
+The four domains are presented sequentially (GSM8K $\to$ MMLU $\to$ ARC $\to$ TruthfulQA), forming a single stream of 2{,}000 questions with distribution shifts between domains. Per-domain and ordering results are in Appendix~\ref{app:per_domain} and Appendix~\ref{app:domain_order}; an additional open-ended variant using TruthfulQA generation answers is reported in Appendix~\ref{app:tqgen}.
 
 \paragraph{Models.}
 We evaluate four instruction-tuned small language models spanning different architectures: Llama~3.2-3B and Llama~3.1-8B \cite{grattafiori_llama_2024}, Gemma~2-2B \cite{team_gemma_2024}, and Phi~3.5-Mini (3.8B) \cite{abdin_phi3_2024}. These were selected because all four exhibit a measurable generation--discrimination gap: their $\text{NormP}_{\text{True}}$ signal is better calibrated than their verbalized confidence, which is the prerequisite for SECL.
@@ -329,10 +230,9 @@ All values below are the best configuration determined through the ablation stud
 LoRA (rank $r{=}8$, $\alpha{=}16$) is applied to the query and value projection matrices of the last 4--8 transformer layers, targeting intermediate-to-late layers where calibration-relevant representations concentrate \cite{du_haloscope_2024}. The exact layer range is model-dependent (Appendix~\ref{app:layer_ablation}). This modifies 328K--786K parameters (${\sim}$0.01--0.02\% of total) per model.
 We optimize with AdamW (learning rate $5 \times 10^{-5}$) for 3 epochs per question. The directional target uses $\alpha_{\text{step}} = 0.5$ and $\delta = 0.15$; both are robust across tested ranges (Appendix~\ref{app:hp_sensitivity}).
 The entropy gate uses $\alpha_{\text{ema}} = 0.05$, $\epsilon = 0.05$, detection threshold $\lambda = 3.0$ (sensitivity analysis in Section~\ref{sec:ablation_studies}), burst length $B = 50$, and a warmup of 30 questions before first detection.
-The normalization temperature $\tau$ is selected per model family via a sweep over the $P(\text{True})$ baseline distribution (Section~\ref{sec:ablation_studies}): $\tau{=}0.7$ for Llama~3.2-3B, $\tau{=}1.5$ for Gemma and Phi, and $\tau{=}3.0$ for Llama~3.1-8B.
+The normalization temperature $\tau$ is fixed per model family from preliminary exploratory runs of the $P(\text{True})$ baseline (Section~\ref{sec:ablation_studies}) and then held constant across datasets: $\tau{=}0.7$ for Llama~3.2-3B, $\tau{=}1.5$ for Gemma and Phi, and $\tau{=}3.0$ for Llama~3.1-8B.
 All experiments run on NVIDIA A100 (80\,GB) and RTX A6000 (48\,GB) GPUs.
-Full hyperparameters are listed in the Appendix. Single run per model, fixed seeds.\footnote{Code and data details upon publication.}
-
+Hyperparameters are in Appendix~\ref{app:hyperparams}. The main table reports fixed-seed runs; Llama multi-seed results appear in Appendix~\ref{app:llama_multiseed}.
 
 \subsection{Main Results} \label{subsec:main_results}
 
@@ -349,10 +249,10 @@ Full hyperparameters are listed in the Appendix. Single run per model, fixed see
 & \multicolumn{3}{c}{\textbf{Phi 3.5-Mini}} \\
 \cmidrule(l{2pt}r{2pt}){3-5} \cmidrule(l{2pt}r{2pt}){6-8} \cmidrule(l{2pt}r{2pt}){9-11} \cmidrule(l{2pt}r{2pt}){12-14}
 \textbf{Method} & \textbf{Cost}{\scriptsize$\downarrow$}
-& ECE{\scriptsize$\downarrow$} & Brier{\scriptsize$\downarrow$} & AUC{\scriptsize$\uparrow$}
-& ECE{\scriptsize$\downarrow$} & Brier{\scriptsize$\downarrow$} & AUC{\scriptsize$\uparrow$}
-& ECE{\scriptsize$\downarrow$} & Brier{\scriptsize$\downarrow$} & AUC{\scriptsize$\uparrow$}
-& ECE{\scriptsize$\downarrow$} & Brier{\scriptsize$\downarrow$} & AUC{\scriptsize$\uparrow$} \\
+& ECE{\scriptsize$\downarrow$} & Brier{\scriptsize$\downarrow$} & AUROC{\scriptsize$\uparrow$}
+& ECE{\scriptsize$\downarrow$} & Brier{\scriptsize$\downarrow$} & AUROC{\scriptsize$\uparrow$}
+& ECE{\scriptsize$\downarrow$} & Brier{\scriptsize$\downarrow$} & AUROC{\scriptsize$\uparrow$}
+& ECE{\scriptsize$\downarrow$} & Brier{\scriptsize$\downarrow$} & AUROC{\scriptsize$\uparrow$} \\
 \midrule
 Verbalized & \textbf{1}
 & .170 & .292 & .510
@@ -388,21 +288,18 @@ Table~\ref{tab:main_results} reports overall metrics across the full 2{,}000-que
 SECL surpasses its own supervision signal, showing that the model internalizes the discriminative signal well enough to generalize beyond the questions it was trained on.
 
 \paragraph{Largest gains appear where miscalibration is most severe.}
-MMLU and TruthfulQA show the largest drop; GSM8K and ARC show smaller gains. Per-domain breakdowns appear in Appendix~\ref{app:domain_order}.
+MMLU and TruthfulQA show the largest drop; GSM8K and ARC show smaller gains. Per-domain breakdowns appear in Appendix~\ref{app:per_domain}.
 
 \paragraph{Comparison with supervised post-hoc calibration.}
-Supervised baselines (temperature scaling, Platt scaling \cite{platt_probabilistic_1999}) fitted with ground-truth labels via 5-fold cross-validation achieve lower ECE but at the cost of severe confidence compression, collapsing predictions into narrow ranges (e.g., [0.44,\,0.56] for Llama). SECL preserves a wide confidence range without any labels (Appendix~\ref{app:posthoc}).
+Supervised baselines (temperature \& Platt scaling \cite{platt_probabilistic_1999} fitted with ground-truth labels via 5-fold cross-validation achieve lower ECE but at the cost of severe confidence compression, collapsing predictions into narrow ranges (e.g., [0.44,\,0.56] for Llama). SECL preserves a wide confidence range without any labels (Appendix~\ref{app:posthoc}).
 
 \paragraph{Accuracy is preserved.}
 Accuracy differs by $<1$ percentage point overall (Table~\ref{tab:main_results}); per-domain shifts are at most 3 percentage points. Unlike RL-based methods that can harm task performance \cite{damani_binary_2025, stangel_rewarding_2025}, SECL updates only the confidence representation, not the model's task behavior.
 
 \paragraph{Computational cost.}
-As shown in Table~\ref{tab:main_results}, SECL is cheaper than its own supervision signal (P(True) Norm) and 2--5$\times$ cheaper than DINCO, despite performing gradient updates. Entropy gating is the key: models that trigger infrequently (Gemma: 5.9\%, Phi: 8.0\%) reduce cost to less than a third of the P(True) Norm baseline (Appendix~\ref{app:cost}).
+SECL is cheaper than P(True) Norm and 2--5$\times$ cheaper than DINCO. Entropy gating is key: models that trigger infrequently (Gemma: 5.9\%, Phi: 8.0\%) reduce cost to less than a third of the P(True) Norm baseline (Appendix~\ref{app:cost}).
 
-
-
-SECL reduces ECE under both forward and reversed domain orderings on all four models, with reductions of 16--71\%. Per-domain ECE wins shift with ordering (e.g., reversed Llama~3B achieves 0.032 on MMLU vs.\ 0.067 forward), indicating genuine adaptation to whichever domain the model encounters. Post-hoc calibration baselines are compared in Appendix~\ref{app:posthoc}.
-
+SECL reduces ECE under both forward and reversed orderings on all four models, with reductions of 16--71\%. Per-domain ECE wins shift with ordering (e.g., reversed Llama~3B reaches 0.032 on MMLU vs.\ 0.067 forward), indicating adaptation to whichever domain the model encounters.
 
 \paragraph{Comparison with DINCO.}
 SECL also outperforms DINCO \cite{wang_calibrating_2025}, the closest inference-time calibration method, which combines NLI-weighted distractor normalization with self-consistency sampling at ${\sim}$10 forward passes per question. SECL achieves lower or equal ECE on all four models at 2--5$\times$ lower amortized cost. On Gemma, DINCO fails entirely: its ECE is worse than the unadapted baseline, and accuracy drops substantially, confirming that NLI-based reweighting is not robust across architectures. DINCO achieves stronger discrimination on Llama and Phi through multiple sampling passes, though its default beam-search answer selection yields lower task accuracy than greedy decoding. Figure~\ref{fig:pareto_main} visualizes the cost--calibration trade-off; details in Appendix~\ref{app:dinco}.
@@ -417,22 +314,10 @@ Table~\ref{tab:gating_ablation} compares four gating strategies on the full 2{,}
 Entropy gating determines \emph{when} to enter a calibration burst; the bin-gate filters \emph{which} questions within the burst receive updates. The combined entropy gate + bin-gate processes only 25.6\% of the stream while matching always-on ECE (0.050 vs.\ 0.047): a 4$\times$ reduction in calibration compute with no measurable loss in calibration quality. This makes SECL cheaper per question than the raw P(True) Norm baseline it learns from.
 
 \paragraph{Directional loss improves over plain MSE.}
-Replacing the directional target with plain MSE toward $\text{NormP}_{\text{True}}$ degrades ECE from 0.052 to 0.085 (Appendix~\ref{app:hp_sensitivity}). The conservative clipping prevents overshooting on noisy targets, confirming that the update direction matters more than the magnitude.
+Replacing the directional target with plain MSE toward $\text{NormP}_{\text{True}}$ degrades ECE from 0.052 to 0.085 (Appendix~\ref{app:hp_sensitivity}). Conservative clipping prevents overshooting noisy targets, confirming that the update direction matters more than its magnitude.
 
 \paragraph{Calibration knowledge must accumulate across questions.}
 Resetting LoRA weights after each question yields ECE 0.237 and degrades AUROC to 0.484, \emph{below chance}, indicating that isolated single-question updates destroy the model's confidence signal entirely (Table~\ref{tab:ablation_accum}). Weight accumulation achieves ECE 0.050: a 4.7$\times$ improvement, demonstrating that calibration knowledge compounds across questions and that the continual learning design is essential, not optional.
-
-\paragraph{Distractor normalization is essential for signal quality.}
-Raw $P(\text{True})$ already improves over the verbalized baseline (ECE: 0.149 vs.\ 0.170), confirming the generation--discrimination gap. Distractor normalization reduces ECE further to 0.065, a 56\% improvement, by converting absolute affirmation into relative preference among candidates and suppressing the suggestibility bias identified by \citet{wang_calibrating_2025} (Appendix~\ref{app:ptrue_norm}).
-
-\paragraph{Signal quality determines the calibration ceiling.}
-This is the most revealing ablation. Replacing $\text{NormP}_{\text{True}}$ with Self-Consistency \cite{wang_selfconsistency_2023} ($N{=}10$) as SECL's training target, while keeping LoRA adaptation, entropy gating, and all hyperparameters identical, degrades ECE from 0.050 to 0.432, which is 2.5$\times$ \emph{worse} than the untrained baseline (0.170). The adaptation mechanism faithfully distills whatever signal it receives: Self-Consistency's systematic overconfidence propagates directly into verbalized confidence, while $\text{NormP}_{\text{True}}$'s tighter correspondence to correctness probability yields well-calibrated outputs (Appendix~\ref{app:target_ablation}).
-
-\paragraph{Calibration is robust to domain ordering.}
-Table~\ref{tab:domain_order} confirms that SECL improves over the baseline under both forward and reversed orderings on all four models, with ECE reductions of 16--78\%.
-
-\paragraph{Hyperparameter sensitivity.}
-Appendix~\ref{app:hp_sensitivity} reports sensitivity to each hyperparameter on Llama~3.2-3B. SECL is robust to most hyperparameters: $\alpha_{\text{step}}$ and $\delta$ have minimal impact on ECE (0.064--0.067 across tested values). The single consequential choice is burst length $B$: $B = 20$ yields ECE 0.114 versus 0.050 for $B = 50$, confirming that sufficient distillation per trigger is critical. This robustness simplifies deployment: only one hyperparameter requires careful tuning.
 
 \begin{table}[!t]
 \centering
@@ -458,35 +343,50 @@ for all models; per-domain breakdowns in Appendix~\ref{app:domain_order}.}
 \label{tab:domain_order}
 \end{table}
 
+
+\paragraph{Distractor normalization is essential for signal quality.}
+Raw $P(\text{True})$ already improves over the verbalized baseline (ECE: 0.161 vs.\ 0.170), confirming the generation--discrimination gap. Distractor normalization reduces ECE further to 0.065, a 60\% improvement, by converting absolute affirmation into relative preference among candidates and suppressing the suggestibility bias identified by \citet{wang_calibrating_2025} (Appendix~\ref{app:ptrue_norm}).
+
+\paragraph{Signal quality determines the calibration ceiling.}
+This is the most revealing ablation. Replacing $\text{NormP}_{\text{True}}$ with Self-Consistency \cite{wang_selfconsistency_2023} ($N{=}10$) as SECL's training target, while keeping LoRA adaptation, entropy gating, and all hyperparameters identical, degrades ECE from 0.050 to 0.432, which is 2.5$\times$ \emph{worse} than the untrained baseline (0.170). The adaptation mechanism faithfully distills whatever signal it receives: Self-Consistency's systematic overconfidence propagates directly into verbalized confidence, while $\text{NormP}_{\text{True}}$'s tighter correspondence to correctness probability yields well-calibrated outputs (Appendix~\ref{app:target_ablation}).
+
+\paragraph{Calibration is robust to domain ordering.}
+Table~\ref{tab:domain_order} confirms that SECL improves over the baseline under both forward and reversed orderings on all four models, with ECE reductions of 16--71\%.
+
+\paragraph{Hyperparameter sensitivity.}
+Appendix~\ref{app:hp_sensitivity} reports sensitivity to each hyperparameter on Llama~3.2-3B. SECL is robust to most hyperparameters: $\alpha_{\text{step}}$ and $\delta$ have minimal impact on ECE (0.064--0.067 across tested values). The single consequential choice is burst length $B$: $B = 20$ yields ECE 0.114 versus 0.050 for $B = 50$, confirming that sufficient distillation per trigger is critical. This robustness simplifies deployment: only one hyperparameter requires careful tuning.
+
 \begin{table}[!t]
 \centering
 \small
 \setlength{\tabcolsep}{4pt}
 \renewcommand{\arraystretch}{1.35}
+\resizebox{\columnwidth}{!}{%
 \begin{tabular}{@{}lcccc@{}}
 \toprule
 \textbf{Strategy} & \textbf{ECE}$\downarrow$ 
-& \textbf{Brier}$\downarrow$ & \textbf{AUC}$\uparrow$ 
+& \textbf{Brier}$\downarrow$ & \textbf{AUROC}$\uparrow$ 
 & \textbf{Trained} \\
 \midrule
 Always-on MSE        & 0.047 & 0.240 & 0.593 & 100\%  \\
-Bin-gate ($=\!1$)    & 0.052 & 0.242 & 0.585 & 55.8\% \\
-Bin-gate ($=\!2$)    & 0.044 & 0.242 & 0.578 & 32.6\% \\
+Bin-gate ($\leq\!1$)    & 0.052 & 0.242 & 0.585 & 55.8\% \\
+Bin-gate ($\leq\!2$)    & 0.044 & 0.242 & 0.578 & 32.6\% \\
 Entropy-gated ($B\!=\!50$) & 0.050 & 0.241 & 0.587 & 25.6\% \\
 \bottomrule
 \end{tabular}
+}
 \caption{Gating strategy ablation (Llama~3.2-3B). Entropy-gated 
 bursts achieve comparable ECE to always-on training while 
 requiring only 25.6\% of questions.}
 \label{tab:gating_ablation}
+\vspace{-1em}
 \end{table}
-
 
 \section{Conclusion} \label{sec:conclusion}
 
-We introduced SECL, a test-time training pipeline that exploits the generation--discrimination gap as label-free self-supervision to continuously improve calibration without labeled data or human supervision. Across four small language models from three model families and four diverse domains, SECL reduces ECE by 56--78\% while preserving task accuracy, training on only 6--26\% of the question stream via entropy-gated adaptation.
+We introduced SECL, a test-time training pipeline that exploits the generation--discrimination gap as label-free self-supervision to continuously improve calibration without labeled data or human supervision. Across four small language models from three model families and four diverse domains, SECL reduces ECE by 56--78\% while preserving task accuracy, training on only 6--26\% of the question stream via entropy-gated adaptation. We conducted seven ablation studies to explore our pipeline and demonstrate that the method is robust to variations in domain ordering and hyperparameter settings, while its success comes from high-quality signal distillation, the necessity of weight accumulation, and entropy-gated adaptation.
 
-Our results suggest a broader principle: when a model's ability to \emph{evaluate} exceeds its ability to \emph{generate}, the gap can be distilled back into the model's outputs via self-supervision. Calibration is a natural first target because the discriminative signal is scalar and cheap to compute, but the same approach could apply to factual accuracy or reasoning consistency wherever an analogous evaluation--generation gap exists. The generation--discrimination gap \cite{kalai_why_2025} is not a deficiency to be tolerated but a resource to be exploited, one that is theoretically expected to grow with scale. Scaling SECL to larger models, integrating richer discriminative signals, and developing online diagnostics for gap closure are direct next steps.
+Our results suggest a broader principle: when a model's ability to evaluate exceeds its ability to generate, the gap can be distilled back into the model's outputs via our self-supervision pipeline. Calibration is a natural first target because the discriminative signal is scalar and cheap to compute, but the same approach applies to factual accuracy or reasoning consistency wherever an analogous evaluation--generation gap exists. This gap \cite{kalai_why_2025} is not a deficiency to be tolerated but a resource to be exploited, one that is theoretically expected to grow with scale. Scaling SECL to larger models and integrating richer discriminative signals are the direct next steps.
 
 \clearpage
 \section*{Limitations} \label{sec:limitations}
@@ -501,7 +401,7 @@ ARC ECE increases slightly in the forward ordering across all three smaller mode
 SECL improves AUROC on Llama~3.2-3B (+0.077) but degrades it on Phi ($-$0.079) and on Llama~3.1-8B ($-$0.041; Appendix~\ref{app:scaling_8b}). Since the LoRA updates target the confidence token, they can redistribute probability mass in ways that improve bin-level calibration at the cost of per-question ranking quality. Brier score, which captures both components, improves across all models, but applications requiring fine-grained discrimination should weigh this trade-off.
 
 \paragraph{Hyperparameter sensitivity.}
-The burst size $B$ is the most important hyperparameter: $B{=}20$ yields ECE 0.114 versus 0.050 for $B{=}50$ on Llama (Section~\ref{sec:ablation_studies}), indicating that sufficient distillation per trigger is necessary. The normalization temperature $\tau$ also requires a per-model-family sweep, meaning SECL is not fully zero-configuration. In deployment settings with very rapid distribution shifts (fewer than 50 questions per domain), the method may not accumulate enough training signal.
+The burst size $B$ is the most important hyperparameter: $B{=}20$ yields ECE 0.114 versus 0.050 for $B{=}50$ on Llama (Section~\ref{sec:ablation_studies}), indicating that sufficient distillation per trigger is necessary. In deployment settings with very rapid distribution shifts (fewer than 50 questions per domain), the method may not accumulate enough training signal.
 
 \paragraph{Scale.}
 We evaluate models up to 8B parameters. While the generation--discrimination gap is theoretically expected to widen with scale \cite{kalai_why_2025}, we have not verified SECL's effectiveness beyond 8B, where the computational cost of LoRA updates would also increase.
@@ -512,40 +412,14 @@ SECL reduces ECE by 56--78\% without human labels or held-out data. This directl
 
 Our target ablation (Section~\ref{sec:ablation_studies}) carries an important ethical lesson: substituting Self-Consistency as the supervision signal makes calibration 2.5$\times$ worse than the unadapted baseline. This demonstrates that self-supervised calibration methods can \emph{amplify} overconfidence when the supervision signal is poorly chosen. Practitioners deploying any self-supervised calibration approach, including SECL, should verify that the underlying signal genuinely correlates with correctness before trusting the resulting confidence scores.
 
-Two further risks merit attention. First, calibration does not imply correctness: a well-calibrated model reporting 60\% confidence is still wrong 40\% of the time. Our AUROC results (Section~\ref{sec:limitations}) show that SECL can degrade per-question ranking quality on some models while improving bin-level calibration, meaning users should not assume that higher confidence always identifies more reliable answers. Second, SECL adapts continuously at test time, so its confidence characteristics evolve with the input stream. This complicates auditing and reproducibility compared to static calibration methods; logging the gating decisions and LoRA checkpoints would be necessary for post-hoc review in regulated domains.
+Two further risks merit attention. First, calibration does not imply correctness: a well-calibrated model reporting 60\% confidence is still wrong 40\% of the time. Our AUROC results (Section~\ref{subsec:main_results}) show that SECL can degrade per-question ranking quality on some models while improving bin-level calibration, meaning users should not assume that higher confidence always identifies more reliable answers. Second, SECL adapts continuously at test time, so its confidence characteristics evolve with the input stream. This complicates auditing and reproducibility compared to static calibration methods; logging the gating decisions and LoRA checkpoints would be necessary for post-hoc review in regulated domains.
 
 All experiments use public benchmarks (GSM8K, MMLU, ARC-Challenge, TruthfulQA) with standard splits. No human data was collected.
 
-% \section*{Acknowledgments}
-
-% This document has been adapted
-% by Steven Bethard, Ryan Cotterell and Rui Yan
-% from the instructions for earlier ACL and NAACL proceedings, including those for
-% ACL 2019 by Douwe Kiela and Ivan Vuli\'{c},
-% NAACL 2019 by Stephanie Lukin and Alla Roskovskaya,
-% ACL 2018 by Shay Cohen, Kevin Gimpel, and Wei Lu,
-% NAACL 2018 by Margaret Mitchell and Stephanie Lukin,
-% Bib\TeX{} suggestions for (NA)ACL 2017/2018 from Jason Eisner,
-% ACL 2017 by Dan Gildea and Min-Yen Kan,
-% NAACL 2017 by Margaret Mitchell,
-% ACL 2012 by Maggie Li and Michael White,
-% ACL 2010 by Jing-Shin Chang and Philipp Koehn,
-% ACL 2008 by Johanna D. Moore, Simone Teufel, James Allan, and Sadaoki Furui,
-% ACL 2005 by Hwee Tou Ng and Kemal Oflazer,
-% ACL 2002 by Eugene Charniak and Dekang Lin,
-% and earlier ACL and EACL formats written by several people, including
-% John Chen, Henry S. Thompson and Donald Walker.
-% Additional elements were taken from the formatting instructions of the \emph{International Joint Conference on Artificial Intelligence} and the \emph{Conference on Computer Vision and Pattern Recognition}.
-
-% Bibliography entries for the entire Anthology, followed by custom entries
-%\bibliography{custom,anthology-overleaf-1,anthology-overleaf-2}
-
-% Custom bibliography entries only
 \newpage
 \bibliography{26_emnlp_selfcalibrating}
 
 \clearpage
 \appendix
-% \onecolumn
 \input{appendix}
 \end{document}
