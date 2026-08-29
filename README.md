@@ -102,8 +102,8 @@ See [`results/FULL_RESULTS.md`](results/FULL_RESULTS.md) and the paper (Brier, A
 ## Installation
 
 ```bash
-git clone https://github.com/rissalhedna/Truthfulness.git
-cd Truthfulness
+git clone https://github.com/rissalhedna/SECL.git
+cd SECL
 pip install -r requirements.txt
 ```
 
